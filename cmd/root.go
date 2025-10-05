@@ -163,22 +163,7 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 		return 0, fmt.Errorf("failed to load po file: %w", err)
 	}
 
-	madeChanges := false
-
-	// Step 1: Clear fuzzy flags
-	fuzzyCount := 0
-	for i := range poFile.Messages {
-		if poFile.Messages[i].Comment.GetFuzzy() {
-			// When a fuzzy entry is re-translated, we clear the fuzzy flag,
-			// the previous translation, and the obsolete msgid comments.
-			poFile.Messages[i].Comment.SetFuzzy(false)
-			poFile.Messages[i].Comment.PrevMsgContext = ""
-			poFile.Messages[i].Comment.PrevMsgId = ""
-			poFile.Messages[i].MsgStr = ""
-			fuzzyCount++
-			madeChanges = true
-		}
-	}
+	fuzzyCount, madeChanges := clearFuzzyEntries(poFile)
 	if fuzzyCount > 0 {
 		fileLog.Info().Int("count", fuzzyCount).Msg("Cleared fuzzy entries")
 	}
@@ -270,4 +255,30 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 
 	fileLog.Info().Float64("duration_seconds", time.Since(start).Seconds()).Msg("Completed processing file")
 	return totalTranslated, nil
+}
+
+// clearFuzzyEntries iterates through a .po file and clears the fuzzy flag
+// and any obsolete comments from messages that are marked as fuzzy.
+// It returns the number of fuzzy entries that were cleared and a boolean
+// indicating whether any changes were made.
+func clearFuzzyEntries(poFile *po.File) (fuzzyCount int, madeChanges bool) {
+	for i := range poFile.Messages {
+		if poFile.Messages[i].Comment.GetFuzzy() {
+			// When a fuzzy entry is re-translated, we clear the fuzzy flag,
+			// the previous translation, and the obsolete msgid comments.
+			var newFlags []string
+			for _, flag := range poFile.Messages[i].Comment.Flags {
+				if flag != "fuzzy" {
+					newFlags = append(newFlags, flag)
+				}
+			}
+			poFile.Messages[i].Comment.Flags = newFlags
+			poFile.Messages[i].Comment.PrevMsgContext = ""
+			poFile.Messages[i].Comment.PrevMsgId = ""
+			poFile.Messages[i].MsgStr = ""
+			fuzzyCount++
+			madeChanges = true
+		}
+	}
+	return fuzzyCount, madeChanges
 }
