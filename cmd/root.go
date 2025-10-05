@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +31,8 @@ var (
 	chunkSize       int
 	dryRun          bool
 	strict          bool
+	dedupe          bool
+	fix             bool
 	maxTranslations int
 )
 
@@ -55,6 +59,8 @@ func init() {
 	rootCmd.Flags().DurationVar(&retryDelay, "retry-delay", 2*time.Second, "Delay between retries")
 	rootCmd.Flags().IntVar(&chunkSize, "chunk-size", 50, "Number of entries to translate per AI request")
 	rootCmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "Process files but do not write any changes")
+	rootCmd.Flags().BoolVar(&dedupe, "dedupe", false, "Deduplicate entries with the same msgid and msgstr")
+	rootCmd.Flags().BoolVar(&fix, "fix", false, "Fix unescaped percent signs in msgid and msgstr")
 	rootCmd.Flags().IntVar(&maxTranslations, "max-translations", 0, "Max number of entries to translate per file (0 for no limit)")
 
 	rootCmd.MarkFlagRequired("provider")
@@ -163,9 +169,31 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 		return 0, fmt.Errorf("failed to load po file: %w", err)
 	}
 
-	fuzzyCount, madeChanges := clearFuzzyEntries(poFile)
-	if fuzzyCount > 0 {
+	var madeChanges bool
+
+	if dedupe {
+		dedupedCount, dedupedChanges, err := deduplicateEntries(poFile)
+		if err != nil {
+			return 0, fmt.Errorf("failed to deduplicate entries: %w", err)
+		}
+		if dedupedChanges {
+			fileLog.Info().Int("count", dedupedCount).Msg("Deduplicated entries")
+			madeChanges = true
+		}
+	}
+
+	if fix {
+		fixCount, fixChanges := fixUnescapedPercents(poFile)
+		if fixChanges {
+			fileLog.Info().Int("count", fixCount).Msg("Fixed unescaped percent signs")
+			madeChanges = madeChanges || fixChanges
+		}
+	}
+
+	fuzzyCount, fuzzyChanges := clearFuzzyEntries(poFile)
+	if fuzzyChanges {
 		fileLog.Info().Int("count", fuzzyCount).Msg("Cleared fuzzy entries")
+		madeChanges = madeChanges || fuzzyChanges
 	}
 
 	// Step 2: Find untranslated entries
@@ -281,4 +309,140 @@ func clearFuzzyEntries(poFile *po.File) (fuzzyCount int, madeChanges bool) {
 		}
 	}
 	return fuzzyCount, madeChanges
+}
+
+// deduplicateEntries removes duplicate messages from a .po file.
+// It identifies duplicates based on a composite key of msgctxt and msgid.
+// When duplicates are found with the same msgstr, it keeps one entry
+// (preferring a non-fuzzy one) and removes the others.
+// It will return an error if two entries have the same msgctxt and msgid but
+// different msgstr values.
+func deduplicateEntries(poFile *po.File) (dedupedCount int, madeChanges bool, err error) {
+	// key: "msgctxt|msgid" -> list of indices
+	msgidMap := make(map[string][]int)
+	for i, msg := range poFile.Messages {
+		if msg.MsgId == "" {
+			continue // Skip header
+		}
+		key := fmt.Sprintf("%s|%s", strings.ToLower(msg.MsgContext), strings.ToLower(msg.MsgId))
+		msgidMap[key] = append(msgidMap[key], i)
+	}
+
+	indicesToRemove := make(map[int]struct{})
+
+	for _, indices := range msgidMap {
+		if len(indices) <= 1 {
+			continue
+		}
+
+		// Check for different msgstr values within the group
+		firstMsgStr := poFile.Messages[indices[0]].MsgStr
+		for i := 1; i < len(indices); i++ {
+			currentIndex := indices[i]
+			if poFile.Messages[currentIndex].MsgStr != firstMsgStr {
+				return 0, false, fmt.Errorf(
+					"duplicate msgid '%s' (context: '%s') with different msgstr: '%s' vs '%s'",
+					poFile.Messages[indices[0]].MsgId,
+					poFile.Messages[indices[0]].MsgContext,
+					firstMsgStr,
+					poFile.Messages[currentIndex].MsgStr,
+				)
+			}
+		}
+
+		// All msgstr are the same; decide which entry to keep.
+		// We prefer to keep a non-fuzzy entry.
+		keepIndex := -1
+		for _, index := range indices {
+			if !poFile.Messages[index].Comment.GetFuzzy() {
+				keepIndex = index
+				break
+			}
+		}
+
+		// If all entries are fuzzy, keep the first one. Its fuzzy state is preserved.
+		if keepIndex == -1 {
+			keepIndex = indices[0]
+		}
+
+		// Mark all other entries in the group for removal.
+		for _, index := range indices {
+			if index != keepIndex {
+				indicesToRemove[index] = struct{}{}
+			}
+		}
+	}
+
+	dedupedCount = len(indicesToRemove)
+	madeChanges = dedupedCount > 0
+
+	if !madeChanges {
+		return 0, false, nil
+	}
+
+	// Now, remove the marked entries by building a new slice.
+	if dedupedCount > 0 {
+		var newMessages []po.Message
+		for i, msg := range poFile.Messages {
+			if _, shouldRemove := indicesToRemove[i]; !shouldRemove {
+				newMessages = append(newMessages, msg)
+			}
+		}
+		poFile.Messages = newMessages
+	}
+
+	return dedupedCount, madeChanges, nil
+}
+
+// fixUnescapedPercents escapes standalone '%' characters in msgid and msgstr
+// fields of a .po file. It is designed to fix issues where strings like "10%"
+// are not correctly escaped as "10%%". It avoids escaping valid Python/C-style
+// format specifiers like `%(name)s` or `%d`.
+func fixUnescapedPercents(poFile *po.File) (fixCount int, madeChanges bool) {
+	// Regex to match all known valid format specifiers, or a lone percent sign.
+	// The order is important: match longer specific patterns first.
+	re := regexp.MustCompile(`%%|%\([^\)]*\)[sdifouxXeEgGcp]|%[sdifouxXeEgGcp]|%`)
+
+	fixer := func(s string) (string, bool) {
+		stringChanged := false
+		replacer := func(match string) string {
+			if match == "%" {
+				stringChanged = true
+				return "%%"
+			}
+			// It was a valid specifier or an already-escaped percent, so return it unchanged.
+			return match
+		}
+		result := re.ReplaceAllStringFunc(s, replacer)
+		return result, stringChanged
+	}
+
+	totalChanges := false
+	count := 0
+
+	for i := range poFile.Messages {
+		msgChanged := false
+
+		if poFile.Messages[i].MsgId != "" {
+			fixedMsgId, idChanged := fixer(poFile.Messages[i].MsgId)
+			if idChanged {
+				poFile.Messages[i].MsgId = fixedMsgId
+				msgChanged = true
+			}
+		}
+
+		if poFile.Messages[i].MsgStr != "" {
+			fixedMsgStr, strChanged := fixer(poFile.Messages[i].MsgStr)
+			if strChanged {
+				poFile.Messages[i].MsgStr = fixedMsgStr
+				msgChanged = true
+			}
+		}
+
+		if msgChanged {
+			totalChanges = true
+			count++
+		}
+	}
+	return count, totalChanges
 }
