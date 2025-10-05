@@ -62,6 +62,13 @@ A Go CLI tool that manages Django/gettext `.po` file translations using AI servi
     ./po-translator --provider=google --model=gemini-1.5-flash -n "locale/**/*.po"
     ```
 
+4.  **Test with a limited number of translations:**
+    To test the translation process on a small subset of entries, use the `--max-translations` flag.
+
+    ```bash
+    ./po-translator --provider=google --model=gemini-1.5-flash --max-translations=5 "locale/**/*.po"
+    ```
+
 ## CLI Reference
 
 ### Usage
@@ -74,19 +81,20 @@ po-translator [flags] <glob-pattern...>
 
 ### Flags
 
-| Flag              | Type     | Default | Description                                                   |
-| ----------------- | -------- | ------- | ------------------------------------------------------------- |
-| `--provider`      | `string` |         | **(Required)** AI provider to use: `google`.                  |
-| `--model`         | `string` |         | **(Required)** Model name to use for translation.             |
-| `--api-key`       | `string` |         | API key for the provider. Overrides environment variables.    |
-| `--chunk-size`    | `int`    | `50`    | Number of entries to translate per AI request.                |
-| `--dry-run`, `-n` | `bool`   | `false` | Process files but do not write any changes.                   |
-| `--log-file`      | `string` |         | Path to log file for output. Defaults to stderr.              |
-| `--log-level`     | `string` | `info`  | Log level (`debug`, `info`, `warn`, `error`).                 |
-| `--max-retries`   | `int`    | `3`     | Max retries for failed API calls.                             |
-| `--retry-delay`   | `duration`| `2s`   | Delay between retries (e.g., `2s`, `500ms`).                   |
-| `--strict`        | `bool`   | `false` | Exit immediately on any error.                                |
-| `--temperature`   | `float`  | `0.3`   | Temperature for AI generation (0.0 to 1.0).                   |
+| Flag                 | Type     | Default | Description                                                   |
+| -------------------- | -------- | ------- | ------------------------------------------------------------- |
+| `--provider`         | `string` |         | **(Required)** AI provider to use: `google`.                  |
+| `--model`            | `string` |         | **(Required)** Model name to use for translation.             |
+| `--api-key`          | `string` |         | API key for the provider. Overrides environment variables.    |
+| `--chunk-size`       | `int`    | `50`    | Number of entries to translate per AI request.                |
+| `--dry-run`, `-n`    | `bool`   | `false` | Process files but do not write any changes.                   |
+| `--log-file`         | `string` |         | Path to log file for output. Defaults to stderr.              |
+| `--log-level`        | `string` | `info`  | Log level (`debug`, `info`, `warn`, `error`).                 |
+| `--max-retries`      | `int`    | `3`     | Max retries for failed API calls.                             |
+| `--max-translations` | `int`    | `0`     | Max number of entries to translate per file (0 for no limit). |
+| `--retry-delay`      | `duration`| `2s`   | Delay between retries (e.g., `2s`, `500ms`).                   |
+| `--strict`           | `bool`   | `false` | Exit immediately on any error.                                |
+| `--temperature`      | `float`  | `0.3`   | Temperature for AI generation (0.0 to 1.0).                   |
 
 ## AI Provider Setup
 

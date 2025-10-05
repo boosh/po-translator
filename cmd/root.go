@@ -26,9 +26,10 @@ var (
 	temperature float32
 	maxRetries  int
 	retryDelay  time.Duration
-	chunkSize   int
-	dryRun      bool
-	strict      bool
+	chunkSize       int
+	dryRun          bool
+	strict          bool
+	maxTranslations int
 )
 
 var rootCmd = &cobra.Command{
@@ -54,6 +55,7 @@ func init() {
 	rootCmd.Flags().DurationVar(&retryDelay, "retry-delay", 2*time.Second, "Delay between retries")
 	rootCmd.Flags().IntVar(&chunkSize, "chunk-size", 50, "Number of entries to translate per AI request")
 	rootCmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "Process files but do not write any changes")
+	rootCmd.Flags().IntVar(&maxTranslations, "max-translations", 0, "Max number of entries to translate per file (0 for no limit)")
 
 	rootCmd.MarkFlagRequired("provider")
 	rootCmd.MarkFlagRequired("model")
@@ -187,6 +189,11 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 		if msg.MsgId != "" && msg.MsgStr == "" {
 			untranslatedJobs = append(untranslatedJobs, job{Index: i, Msg: msg})
 		}
+	}
+
+	if maxTranslations > 0 && len(untranslatedJobs) > maxTranslations {
+		fileLog.Info().Int("limit", maxTranslations).Int("original_count", len(untranslatedJobs)).Msg("Limiting translations to max-translations")
+		untranslatedJobs = untranslatedJobs[:maxTranslations]
 	}
 
 	if len(untranslatedJobs) == 0 {
