@@ -27,14 +27,14 @@ A Go CLI tool that manages Django/gettext `.po` file translations using AI servi
 
 3.  **Build from source:**
     ```bash
-    go build -o po-translator .
+    make build
     ```
     This will create a `po-translator` executable in the current directory.
 
 4.  **Install (optional):**
     To make the tool available system-wide, you can install it to your Go bin directory:
     ```bash
-    go install .
+    make install
     ```
     Ensure that `$(go env GOPATH)/bin` is in your system's `PATH`.
 
@@ -56,10 +56,10 @@ A Go CLI tool that manages Django/gettext `.po` file translations using AI servi
     ```
 
 3.  **Perform a dry run:**
-    To see what the tool *would* do without making any changes, use the `--dry-run` flag.
+    To see what the tool *would* do without making any changes, use the `--dry-run` or `-n` flag.
 
     ```bash
-    ./po-translator --provider=google --model=gemini-1.5-flash --dry-run "locale/**/*.po"
+    ./po-translator --provider=google --model=gemini-1.5-flash -n "locale/**/*.po"
     ```
 
 ## CLI Reference
@@ -80,7 +80,7 @@ po-translator [flags] <glob-pattern...>
 | `--model`         | `string` |         | **(Required)** Model name to use for translation.             |
 | `--api-key`       | `string` |         | API key for the provider. Overrides environment variables.    |
 | `--chunk-size`    | `int`    | `50`    | Number of entries to translate per AI request.                |
-| `--dry-run`       | `bool`   | `false` | Process files but do not write any changes.                   |
+| `--dry-run`, `-n` | `bool`   | `false` | Process files but do not write any changes.                   |
 | `--log-file`      | `string` |         | Path to log file for output. Defaults to stderr.              |
 | `--log-level`     | `string` | `info`  | Log level (`debug`, `info`, `warn`, `error`).                 |
 | `--max-retries`   | `int`    | `3`     | Max retries for failed API calls.                             |
@@ -104,10 +104,10 @@ po-translator [flags] <glob-pattern...>
 
 ### Building
 ```bash
-go build -o po-translator .
+make build
 ```
 
 ### Running Tests
 ```bash
-go test ./...
+make test
 ```

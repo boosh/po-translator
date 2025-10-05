@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/chai2010/gettext-go/po"
 	"github.com/joho/godotenv"
 	"github.com/rs/zerolog/log"
@@ -53,7 +53,7 @@ func init() {
 	rootCmd.Flags().IntVar(&maxRetries, "max-retries", 3, "Max retries for failed API calls")
 	rootCmd.Flags().DurationVar(&retryDelay, "retry-delay", 2*time.Second, "Delay between retries")
 	rootCmd.Flags().IntVar(&chunkSize, "chunk-size", 50, "Number of entries to translate per AI request")
-	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Process files but do not write any changes")
+	rootCmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "Process files but do not write any changes")
 
 	rootCmd.MarkFlagRequired("provider")
 	rootCmd.MarkFlagRequired("model")
@@ -85,7 +85,7 @@ func run(cmd *cobra.Command, args []string) {
 	start := time.Now()
 	var allFiles []string
 	for _, pattern := range args {
-		matches, err := filepath.Glob(pattern)
+		matches, err := doublestar.Glob(os.DirFS("."), pattern)
 		if err != nil {
 			log.Warn().Err(err).Str("pattern", pattern).Msg("Invalid glob pattern")
 			continue
@@ -200,6 +200,11 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 	}
 
 	fileLog.Info().Int("count", len(untranslatedJobs)).Msg("Found untranslated entries")
+
+	if dryRun {
+		fileLog.Info().Msg("DRY RUN: Skipping API calls and file modifications.")
+		return int64(len(untranslatedJobs)), nil
+	}
 
 	// Step 3: Translate in chunks
 	var totalTranslated int64 = 0
