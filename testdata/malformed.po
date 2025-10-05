@@ -1,0 +1,9 @@
+# Malformed PO file.
+msgid "A valid entry"
+msgstr "A valid string"
+
+msgid "An entry with no msgstr"
+
+"this line is invalid"
+msgid "Another valid entry"
+msgstr "Another valid string"

@@ -1,0 +1,17 @@
+# PO file with fuzzy entries.
+msgid ""
+msgstr ""
+"Project-Id-Version: po-translator 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: fr\n"
+
+#, fuzzy
+msgid "You have %(num)d new messages."
+msgstr "Vous avez %(num)d nouveaux messages."
+
+msgid "This entry is not fuzzy."
+msgstr "Cette entrée n'est pas floue."
+
+#, fuzzy
+msgid "Another fuzzy entry."
+msgstr "Une autre entrée floue."
