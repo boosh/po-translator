@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/chai2010/gettext-go/po"
 	"github.com/joho/godotenv"
 	"github.com/rs/zerolog/log"
@@ -26,9 +26,10 @@ var (
 	temperature float32
 	maxRetries  int
 	retryDelay  time.Duration
-	chunkSize   int
-	dryRun      bool
-	strict      bool
+	chunkSize       int
+	dryRun          bool
+	strict          bool
+	maxTranslations int
 )
 
 var rootCmd = &cobra.Command{
@@ -53,7 +54,8 @@ func init() {
 	rootCmd.Flags().IntVar(&maxRetries, "max-retries", 3, "Max retries for failed API calls")
 	rootCmd.Flags().DurationVar(&retryDelay, "retry-delay", 2*time.Second, "Delay between retries")
 	rootCmd.Flags().IntVar(&chunkSize, "chunk-size", 50, "Number of entries to translate per AI request")
-	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Process files but do not write any changes")
+	rootCmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "Process files but do not write any changes")
+	rootCmd.Flags().IntVar(&maxTranslations, "max-translations", 0, "Max number of entries to translate per file (0 for no limit)")
 
 	rootCmd.MarkFlagRequired("provider")
 	rootCmd.MarkFlagRequired("model")
@@ -85,7 +87,7 @@ func run(cmd *cobra.Command, args []string) {
 	start := time.Now()
 	var allFiles []string
 	for _, pattern := range args {
-		matches, err := filepath.Glob(pattern)
+		matches, err := doublestar.Glob(os.DirFS("."), pattern)
 		if err != nil {
 			log.Warn().Err(err).Str("pattern", pattern).Msg("Invalid glob pattern")
 			continue
@@ -161,18 +163,7 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 		return 0, fmt.Errorf("failed to load po file: %w", err)
 	}
 
-	madeChanges := false
-
-	// Step 1: Clear fuzzy flags
-	fuzzyCount := 0
-	for i := range poFile.Messages {
-		if poFile.Messages[i].Comment.GetFuzzy() {
-			poFile.Messages[i].Comment.SetFuzzy(false)
-			poFile.Messages[i].MsgStr = ""
-			fuzzyCount++
-			madeChanges = true
-		}
-	}
+	fuzzyCount, madeChanges := clearFuzzyEntries(poFile)
 	if fuzzyCount > 0 {
 		fileLog.Info().Int("count", fuzzyCount).Msg("Cleared fuzzy entries")
 	}
@@ -189,6 +180,11 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 		}
 	}
 
+	if maxTranslations > 0 && len(untranslatedJobs) > maxTranslations {
+		fileLog.Info().Int("limit", maxTranslations).Int("original_count", len(untranslatedJobs)).Msg("Limiting translations to max-translations")
+		untranslatedJobs = untranslatedJobs[:maxTranslations]
+	}
+
 	if len(untranslatedJobs) == 0 {
 		fileLog.Info().Msg("No untranslated entries found")
 		if !dryRun && madeChanges {
@@ -200,6 +196,19 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 	}
 
 	fileLog.Info().Int("count", len(untranslatedJobs)).Msg("Found untranslated entries")
+
+	if dryRun {
+		if madeChanges {
+			fileLog.Info().Msg("DRY RUN: Fuzzy entries would be cleared.")
+		}
+		if len(untranslatedJobs) > 0 {
+			fileLog.Info().Msg("DRY RUN: The following entries would be translated:")
+			for _, job := range untranslatedJobs {
+				fileLog.Info().Str("msgid", job.Msg.MsgId).Msg("  - Would translate")
+			}
+		}
+		return int64(len(untranslatedJobs)), nil
+	}
 
 	// Step 3: Translate in chunks
 	var totalTranslated int64 = 0
@@ -246,4 +255,30 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 
 	fileLog.Info().Float64("duration_seconds", time.Since(start).Seconds()).Msg("Completed processing file")
 	return totalTranslated, nil
+}
+
+// clearFuzzyEntries iterates through a .po file and clears the fuzzy flag
+// and any obsolete comments from messages that are marked as fuzzy.
+// It returns the number of fuzzy entries that were cleared and a boolean
+// indicating whether any changes were made.
+func clearFuzzyEntries(poFile *po.File) (fuzzyCount int, madeChanges bool) {
+	for i := range poFile.Messages {
+		if poFile.Messages[i].Comment.GetFuzzy() {
+			// When a fuzzy entry is re-translated, we clear the fuzzy flag,
+			// the previous translation, and the obsolete msgid comments.
+			var newFlags []string
+			for _, flag := range poFile.Messages[i].Comment.Flags {
+				if flag != "fuzzy" {
+					newFlags = append(newFlags, flag)
+				}
+			}
+			poFile.Messages[i].Comment.Flags = newFlags
+			poFile.Messages[i].Comment.PrevMsgContext = ""
+			poFile.Messages[i].Comment.PrevMsgId = ""
+			poFile.Messages[i].MsgStr = ""
+			fuzzyCount++
+			madeChanges = true
+		}
+	}
+	return fuzzyCount, madeChanges
 }
