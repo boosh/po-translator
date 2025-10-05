@@ -210,7 +210,7 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 		return int64(len(untranslatedJobs)), nil
 	}
 
-	// Step 3: Translate in chunks
+	// Step 3: Translate in chunks and save progressively
 	var totalTranslated int64 = 0
 	for i := 0; i < len(untranslatedJobs); i += chunkSize {
 		end := i + chunkSize
@@ -234,9 +234,15 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 		chunkStart := time.Now()
 		translations, err := translator.TranslateChunk(ctx, provider, msgChunk, path)
 		if err != nil {
-			return 0, fmt.Errorf("translation error in chunk %d-%d: %w", i+1, end, err)
+			// Return the count of translations completed so far, even if this chunk failed
+			return totalTranslated, fmt.Errorf("translation error in chunk %d-%d: %w", i+1, end, err)
 		}
 		chunkLog.Debug().Float64("duration_seconds", time.Since(chunkStart).Seconds()).Msg("Chunk translation took")
+
+		if len(translations) == 0 {
+			chunkLog.Info().Msg("Chunk processed, but no translations were returned.")
+			continue
+		}
 
 		for j, translation := range translations {
 			originalIndex := jobChunk[j].Index
@@ -244,12 +250,14 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 		}
 		totalTranslated += int64(len(translations))
 		madeChanges = true
-	}
 
-	// Step 4: Save the file
-	if !dryRun && madeChanges {
-		if err := poFile.Save(path); err != nil {
-			return 0, fmt.Errorf("failed to save translated file: %w", err)
+		// Save progress after each chunk
+		if !dryRun {
+			chunkLog.Debug().Msg("Saving progress to file")
+			if err := poFile.Save(path); err != nil {
+				// Return the count of translations successfully processed so far, along with the save error
+				return totalTranslated, fmt.Errorf("failed to save progress after chunk %d-%d: %w", i+1, end, err)
+			}
 		}
 	}
 
