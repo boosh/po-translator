@@ -169,7 +169,11 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 	fuzzyCount := 0
 	for i := range poFile.Messages {
 		if poFile.Messages[i].Comment.GetFuzzy() {
+			// When a fuzzy entry is re-translated, we clear the fuzzy flag,
+			// the previous translation, and the obsolete msgid comments.
 			poFile.Messages[i].Comment.SetFuzzy(false)
+			poFile.Messages[i].Comment.PrevMsgContext = ""
+			poFile.Messages[i].Comment.PrevMsgId = ""
 			poFile.Messages[i].MsgStr = ""
 			fuzzyCount++
 			madeChanges = true
