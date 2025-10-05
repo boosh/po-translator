@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"sync"
 	"time"
 
@@ -193,6 +195,12 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 	if fuzzyChanges {
 		fileLog.Info().Int("count", fuzzyCount).Msg("Cleared fuzzy entries")
 		madeChanges = madeChanges || fuzzyChanges
+	}
+
+	// Sort messages by msgid to ensure stable order
+	if sortChanges := sortMessages(poFile); sortChanges {
+		fileLog.Info().Msg("Reordered messages by msgid")
+		madeChanges = true
 	}
 
 	// Step 2: Find untranslated entries
@@ -452,4 +460,41 @@ func fixUnescapedPercents(poFile *po.File) (fixCount int, madeChanges bool) {
 		}
 	}
 	return count, totalChanges
+}
+
+// sortMessages sorts the messages in a .po file by msgid.
+// It preserves the header entry at the beginning of the file.
+// sortMessages sorts the messages in a .po file by msgid.
+// It preserves the header entry at the beginning of the file.
+// It returns a boolean indicating whether the order of messages was changed.
+func sortMessages(poFile *po.File) bool {
+	if len(poFile.Messages) <= 1 {
+		return false
+	}
+
+	// Capture the original order of msgids to detect changes.
+	originalOrder := make([][]byte, 0, len(poFile.Messages))
+	for _, msg := range poFile.Messages {
+		originalOrder = append(originalOrder, []byte(msg.MsgId))
+	}
+
+	// Separate the header (first message, usually with empty msgid)
+	header := poFile.Messages[0]
+	messages := poFile.Messages[1:]
+
+	sort.SliceStable(messages, func(i, j int) bool {
+		return messages[i].MsgId < messages[j].MsgId
+	})
+
+	// Re-assemble the messages with the header at the top
+	poFile.Messages = append([]po.Message{header}, messages...)
+
+	// Check if the order has actually changed
+	for i, msg := range poFile.Messages {
+		if !bytes.Equal(originalOrder[i], []byte(msg.MsgId)) {
+			return true // Order has changed
+		}
+	}
+
+	return false // Order is the same
 }
