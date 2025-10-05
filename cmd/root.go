@@ -202,7 +202,15 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 	fileLog.Info().Int("count", len(untranslatedJobs)).Msg("Found untranslated entries")
 
 	if dryRun {
-		fileLog.Info().Msg("DRY RUN: Skipping API calls and file modifications.")
+		if madeChanges {
+			fileLog.Info().Msg("DRY RUN: Fuzzy entries would be cleared.")
+		}
+		if len(untranslatedJobs) > 0 {
+			fileLog.Info().Msg("DRY RUN: The following entries would be translated:")
+			for _, job := range untranslatedJobs {
+				fileLog.Info().Str("msgid", job.Msg.MsgId).Msg("  - Would translate")
+			}
+		}
 		return int64(len(untranslatedJobs)), nil
 	}
 
