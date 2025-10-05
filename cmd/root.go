@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -324,7 +323,7 @@ func deduplicateEntries(poFile *po.File) (dedupedCount int, madeChanges bool, er
 		if msg.MsgId == "" {
 			continue // Skip header
 		}
-		key := fmt.Sprintf("%s|%s", strings.ToLower(msg.MsgContext), strings.ToLower(msg.MsgId))
+		key := fmt.Sprintf("%s|%s", msg.MsgContext, msg.MsgId)
 		msgidMap[key] = append(msgidMap[key], i)
 	}
 

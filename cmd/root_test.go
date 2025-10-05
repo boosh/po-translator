@@ -72,7 +72,28 @@ func TestClearFuzzyEntries_NoFuzzy(t *testing.T) {
 }
 
 func TestDeduplicateEntries(t *testing.T) {
-	t.Run("removes fuzzy duplicate", func(t *testing.T) {
+	t.Run("removes fuzzy duplicate with exact match", func(t *testing.T) {
+		poFile := &po.File{
+			Messages: []po.Message{
+				{MsgId: "Keywords", MsgStr: "Palabras clave"},
+				{
+					MsgId:   "Keywords",
+					MsgStr:  "Palabras clave",
+					Comment: po.Comment{Flags: []string{"fuzzy"}},
+				},
+			},
+		}
+
+		dedupedCount, madeChanges, err := deduplicateEntries(poFile)
+		assert.NoError(t, err)
+		assert.True(t, madeChanges)
+		assert.Equal(t, 1, dedupedCount)
+		assert.Len(t, poFile.Messages, 1)
+		assert.Equal(t, "Keywords", poFile.Messages[0].MsgId)
+		assert.False(t, poFile.Messages[0].Comment.GetFuzzy())
+	})
+
+	t.Run("does not deduplicate different-case msgids", func(t *testing.T) {
 		poFile := &po.File{
 			Messages: []po.Message{
 				{MsgId: "Secondary Keywords", MsgStr: "Palabras clave secundarias"},
@@ -86,11 +107,9 @@ func TestDeduplicateEntries(t *testing.T) {
 
 		dedupedCount, madeChanges, err := deduplicateEntries(poFile)
 		assert.NoError(t, err)
-		assert.True(t, madeChanges)
-		assert.Equal(t, 1, dedupedCount)
-		assert.Len(t, poFile.Messages, 1)
-		assert.Equal(t, "Secondary Keywords", poFile.Messages[0].MsgId)
-		assert.False(t, poFile.Messages[0].Comment.GetFuzzy())
+		assert.False(t, madeChanges, "Should not deduplicate entries with different casing")
+		assert.Equal(t, 0, dedupedCount)
+		assert.Len(t, poFile.Messages, 2)
 	})
 
 	t.Run("removes non-fuzzy duplicate", func(t *testing.T) {
