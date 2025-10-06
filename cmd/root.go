@@ -102,10 +102,10 @@ func run(cmd *cobra.Command, args []string) {
 	log.Info().Msg("--- Starting pre-processing pass (dedupe, fix, sort) ---")
 	var filesToTranslate []string
 	var totalErrors int64
-	untranslatedFileCounts := make(map[string]int)
+	untranslatedFileMessages := make(map[string][]po.Message)
 
 	for _, path := range allFiles {
-		needsTranslation, untranslatedCount, err := preprocessFile(path)
+		untranslated, err := preprocessFile(path)
 		if err != nil {
 			log.Error().Err(err).Str("file", path).Msg("Failed during pre-processing")
 			atomic.AddInt64(&totalErrors, 1)
@@ -114,9 +114,9 @@ func run(cmd *cobra.Command, args []string) {
 			}
 			continue
 		}
-		if needsTranslation {
+		if len(untranslated) > 0 {
 			filesToTranslate = append(filesToTranslate, path)
-			untranslatedFileCounts[path] = untranslatedCount
+			untranslatedFileMessages[path] = untranslated
 		}
 	}
 
@@ -133,14 +133,25 @@ func run(cmd *cobra.Command, args []string) {
 	}
 
 	totalUntranslated := 0
-	for _, count := range untranslatedFileCounts {
-		totalUntranslated += count
+	for _, msgs := range untranslatedFileMessages {
+		totalUntranslated += len(msgs)
 	}
 
 	if !yes && !dryRun {
 		fmt.Println("The following files have untranslated entries:")
 		for _, path := range filesToTranslate {
-			fmt.Printf("  - %s: %d entries\n", path, untranslatedFileCounts[path])
+			messages := untranslatedFileMessages[path]
+			fmt.Printf("  - %s: %d entries\n", path, len(messages))
+			for _, msg := range messages {
+				// To avoid spamming the console, truncate long msgids
+				msgidForDisplay := msg.MsgId
+				if len(msgidForDisplay) > 70 {
+					msgidForDisplay = msgidForDisplay[:67] + "..."
+				}
+				// Escape newlines to keep the output clean
+				msgidForDisplay = strings.ReplaceAll(msgidForDisplay, "\n", "\\n")
+				fmt.Printf("    - msgid: \"%s\"\n", msgidForDisplay)
+			}
 		}
 		fmt.Printf("\nTotal: %d untranslated entries across %d file(s).\n", totalUntranslated, len(filesToTranslate))
 		fmt.Print("Proceed with translation? (y/N): ")
@@ -224,30 +235,30 @@ func initProvider(ctx context.Context) (translator.Provider, error) {
 	return p, nil
 }
 
-func preprocessFile(path string) (needsTranslation bool, untranslatedCount int, err error) {
+func preprocessFile(path string) ([]po.Message, error) {
 	fileLog := log.With().Str("file", path).Logger()
 	fileLog.Info().Msg("Pre-processing file")
 
 	poFile, err := po.LoadFile(path)
 	if err != nil {
-		return false, 0, fmt.Errorf("failed to load po file: %w", err)
+		return nil, fmt.Errorf("failed to load po file: %w", err)
 	}
 
 	var madeChanges bool
-	if dedupe {
-		count, changed, err := deduplicateEntries(poFile)
-		if err != nil {
-			return false, 0, err
-		}
-		if changed {
-			fileLog.Info().Int("count", count).Msg("Deduplicated entries")
-			madeChanges = true
-		}
-	}
 	if fix {
 		count, changed := fixUnescapedPercents(poFile)
 		if changed {
 			fileLog.Info().Int("count", count).Msg("Fixed unescaped percent signs")
+			madeChanges = true
+		}
+	}
+	if dedupe {
+		count, changed, err := deduplicateEntries(poFile)
+		if err != nil {
+			return nil, err
+		}
+		if changed {
+			fileLog.Info().Int("count", count).Msg("Deduplicated entries")
 			madeChanges = true
 		}
 	}
@@ -260,28 +271,38 @@ func preprocessFile(path string) (needsTranslation bool, untranslatedCount int, 
 		madeChanges = true
 	}
 
+	if madeChanges && !dryRun {
+		if err := savePoFile(poFile, path); err != nil {
+			return nil, fmt.Errorf("failed to save file after pre-processing: %w", err)
+		}
+		// After saving, reload the file to ensure our in-memory representation
+		// matches the canonical version on disk. This prevents issues where the
+		// gettext library's internal state after modifications differs from its
+		// state after a fresh parse.
+		reloadedPoFile, err := po.LoadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to reload .po file after saving: %w", err)
+		}
+		poFile = reloadedPoFile
+	}
+
+	var untranslated []po.Message
 	for _, msg := range poFile.Messages {
 		if msg.MsgId != "" && msg.MsgStr == "" {
-			untranslatedCount++
+			untranslated = append(untranslated, msg)
 		}
 	}
 
-	if untranslatedCount == 0 && revertIfUnchanged {
+	if len(untranslated) == 0 && revertIfUnchanged {
 		err := git.RevertFile(path)
 		if err == nil {
 			fileLog.Info().Msg("Reverted file to git HEAD version to avoid spurious commit")
-			return false, 0, nil
+			return nil, nil
 		}
 		fileLog.Warn().Err(err).Msg("Could not revert file to git HEAD, saving cleaned-up version instead")
 	}
 
-	if madeChanges && !dryRun {
-		if err := savePoFile(poFile, path); err != nil {
-			return false, 0, fmt.Errorf("failed to save file after pre-processing: %w", err)
-		}
-	}
-
-	return untranslatedCount > 0, untranslatedCount, nil
+	return untranslated, nil
 }
 
 func translateFile(ctx context.Context, provider translator.Provider, path string, chunkSize int) (int64, error) {
