@@ -27,21 +27,36 @@ func GetRevisionDateFromGit(path string) (string, error) {
 	rootCmd.Dir = dir
 	rootOutput, err := rootCmd.Output()
 	if err != nil {
+		// If the command fails, include git's stderr for better debugging.
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("could not find git repository root for path %s: %w\nstderr: %s", path, err, string(exitErr.Stderr))
+		}
 		return "", fmt.Errorf("could not find git repository root for path %s: %w", path, err)
 	}
 	repoRoot := strings.TrimSpace(string(rootOutput))
 
-	// Get the file path relative to the repo root
-	relPath, err := filepath.Rel(repoRoot, absPath)
+	// Resolve symlinks in both paths to prevent "outside repository" errors on macOS
+	// where /var is a symlink to /private/var.
+	realRepoRoot, err := filepath.EvalSymlinks(repoRoot)
 	if err != nil {
-		return "", fmt.Errorf("could not get relative path for file %s: %w", absPath, err)
+		return "", fmt.Errorf("could not resolve symlinks for repo root %s: %w", repoRoot, err)
+	}
+	realAbsPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return "", fmt.Errorf("could not resolve symlinks for file path %s: %w", absPath, err)
+	}
+
+	// Get the file path relative to the repo root
+	relPath, err := filepath.Rel(realRepoRoot, realAbsPath)
+	if err != nil {
+		return "", fmt.Errorf("could not get relative path for file %s: %w", realAbsPath, err)
 	}
 
 	// Use forward slashes for git path
 	gitPath := filepath.ToSlash(relPath)
 
 	cmd := exec.Command("git", "show", "HEAD", "--", gitPath)
-	cmd.Dir = repoRoot // Run the command from the repo root
+	cmd.Dir = realRepoRoot // Run the command from the resolved repo root
 	output, err := cmd.Output()
 	if err != nil {
 		// If the command fails, include git's stderr for better debugging.
