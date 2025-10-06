@@ -234,6 +234,13 @@ func preprocessFile(path string) (needsTranslation bool, untranslatedCount int, 
 	}
 
 	var madeChanges bool
+	if fix {
+		count, changed := fixUnescapedPercents(poFile)
+		if changed {
+			fileLog.Info().Int("count", count).Msg("Fixed unescaped percent signs")
+			madeChanges = true
+		}
+	}
 	if dedupe {
 		count, changed, err := deduplicateEntries(poFile)
 		if err != nil {
@@ -241,13 +248,6 @@ func preprocessFile(path string) (needsTranslation bool, untranslatedCount int, 
 		}
 		if changed {
 			fileLog.Info().Int("count", count).Msg("Deduplicated entries")
-			madeChanges = true
-		}
-	}
-	if fix {
-		count, changed := fixUnescapedPercents(poFile)
-		if changed {
-			fileLog.Info().Int("count", count).Msg("Fixed unescaped percent signs")
 			madeChanges = true
 		}
 	}
@@ -397,13 +397,29 @@ func deduplicateEntries(poFile *po.File) (dedupedCount int, madeChanges bool, er
 		if len(indices) <= 1 {
 			continue
 		}
-		firstMsgStr := poFile.Messages[indices[0]].MsgStr
-		for i := 1; i < len(indices); i++ {
-			if poFile.Messages[indices[i]].MsgStr != firstMsgStr {
-				return 0, false, fmt.Errorf("duplicate msgid '%s' (context: '%s') with different msgstr", poFile.Messages[indices[0]].MsgId, poFile.Messages[indices[0]].MsgContext)
+
+		var definitiveMsgStr string
+		var hasConflict bool
+		var keepIndex = -1
+
+		// Find the definitive translation and check for conflicts.
+		for _, index := range indices {
+			msgStr := poFile.Messages[index].MsgStr
+			if msgStr != "" {
+				if definitiveMsgStr == "" {
+					definitiveMsgStr = msgStr
+				} else if definitiveMsgStr != msgStr {
+					hasConflict = true
+					break
+				}
 			}
 		}
-		keepIndex := -1
+
+		if hasConflict {
+			return 0, false, fmt.Errorf("duplicate msgid '%s' (context: '%s') with different msgstr", poFile.Messages[indices[0]].MsgId, poFile.Messages[indices[0]].MsgContext)
+		}
+
+		// Decide which entry to keep: prefer non-fuzzy entries.
 		for _, index := range indices {
 			if !poFile.Messages[index].Comment.GetFuzzy() {
 				keepIndex = index
@@ -411,8 +427,15 @@ func deduplicateEntries(poFile *po.File) (dedupedCount int, madeChanges bool, er
 			}
 		}
 		if keepIndex == -1 {
-			keepIndex = indices[0]
+			keepIndex = indices[0] // All entries are fuzzy, so keep the first one.
 		}
+
+		// Ensure the kept entry has the definitive translation.
+		if poFile.Messages[keepIndex].MsgStr == "" && definitiveMsgStr != "" {
+			poFile.Messages[keepIndex].MsgStr = definitiveMsgStr
+		}
+
+		// Mark all other duplicates for removal.
 		for _, index := range indices {
 			if index != keepIndex {
 				indicesToRemove[index] = struct{}{}

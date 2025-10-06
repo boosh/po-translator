@@ -320,6 +320,79 @@ func TestFixUnescapedPercents(t *testing.T) {
 	}
 }
 
+func TestPreprocessFile_FixDedupeInteraction(t *testing.T) {
+	// This test simulates the user's scenario where --fix and --dedupe are used together.
+	// The hypothesis is that the order of operations is wrong, causing translations to be lost.
+	tempDir, err := os.MkdirTemp("", "test-fix-dedupe")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	// This content contains two entries that will be duplicates AFTER --fix runs.
+	// Entry 1 is correct and has a translation.
+	// Entry 2 has an unescaped percent and an empty translation.
+	poContent := `
+# Correct entry with translation
+#, python-format
+msgid ""
+"- Our new blend is 20%% stronger\n"
+"- It's sourced from a family-run farm in Colombia\n"
+"- Mention the free shipping this week"
+msgstr ""
+"- Nuestra nueva mezcla es un 20%% más fuerte\n"
+"- Proviene de una granja familiar en Colombia\n"
+"- Menciona el envío gratuito esta semana"
+
+# Entry that will become a duplicate of the first after --fix runs
+#, python-format
+msgid ""
+"- Our new blend is 20% stronger\n"
+"- It's sourced from a family-run farm in Colombia\n"
+"- Mention the free shipping this week"
+msgstr ""
+`
+	poPath := filepath.Join(tempDir, "test.po")
+	initialPo, err := po.Load([]byte(poContent))
+	require.NoError(t, err)
+	err = savePoFile(initialPo, poPath)
+	require.NoError(t, err)
+
+	// Set the global flags for this test case
+	fix = true
+	dedupe = true
+	defer func() {
+		fix = false
+		dedupe = false
+	}()
+
+	// Run preprocessFile
+	_, _, err = preprocessFile(poPath)
+	assert.NoError(t, err)
+
+	// Load the final .po file to inspect its contents
+	finalPoFile, err := po.LoadFile(poPath)
+	require.NoError(t, err)
+
+	// There should only be one message left after fixing and deduplication
+	var messages []po.Message
+	for _, msg := range finalPoFile.Messages {
+		if msg.MsgId != "" { // Ignore header
+			messages = append(messages, msg)
+		}
+	}
+	require.Len(t, messages, 1, "Expected only one message after deduplication")
+
+	finalMsg := messages[0]
+
+	// The msgstr should NOT be empty.
+	assert.NotEmpty(t, finalMsg.MsgStr, "The msgstr should not have been cleared")
+
+	// Check that the content is what we expect.
+	expectedMsgId := "- Our new blend is 20%% stronger\n- It's sourced from a family-run farm in Colombia\n- Mention the free shipping this week"
+	expectedMsgStr := "- Nuestra nueva mezcla es un 20%% más fuerte\n- Proviene de una granja familiar en Colombia\n- Menciona el envío gratuito esta semana"
+	assert.Equal(t, expectedMsgId, finalMsg.MsgId)
+	assert.Equal(t, expectedMsgStr, finalMsg.MsgStr)
+}
+
 func TestPreprocessFile_RevertIfUnchanged(t *testing.T) {
 	// Skip test if git is not installed
 	if _, err := exec.LookPath("git"); err != nil {
