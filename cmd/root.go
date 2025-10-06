@@ -35,6 +35,7 @@ var (
 	dedupe          bool
 	fix             bool
 	maxTranslations int
+	noTranslate     bool
 )
 
 var rootCmd = &cobra.Command{
@@ -63,9 +64,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&dedupe, "dedupe", false, "Deduplicate entries with the same msgid and msgstr")
 	rootCmd.Flags().BoolVar(&fix, "fix", false, "Fix unescaped percent signs in msgid and msgstr")
 	rootCmd.Flags().IntVar(&maxTranslations, "max-translations", 0, "Max number of entries to translate per file (0 for no limit)")
+	rootCmd.Flags().BoolVar(&noTranslate, "no-translate", false, "Disable translation and only perform other operations (e.g., --fix, --dedupe)")
 
-	rootCmd.MarkFlagRequired("provider")
-	rootCmd.MarkFlagRequired("model")
 }
 
 func Execute() {
@@ -78,18 +78,32 @@ func run(cmd *cobra.Command, args []string) {
 	logger.Setup(logLevel, logFile)
 	ctx := context.Background()
 
-	providerConfig := translator.Config{
-		Provider:    provider,
-		Model:       model,
-		APIKey:      apiKey,
-		Temperature: temperature,
-		MaxRetries:  maxRetries,
+	var aiProvider translator.Provider
+	var err error
+
+	if !noTranslate {
+		if provider == "" {
+			log.Fatal().Msg("Error: --provider is required unless --no-translate is set")
+		}
+		if model == "" {
+			log.Fatal().Msg("Error: --model is required unless --no-translate is set")
+		}
+
+		providerConfig := translator.Config{
+			Provider:    provider,
+			Model:       model,
+			APIKey:      apiKey,
+			Temperature: temperature,
+			MaxRetries:  maxRetries,
+		}
+		aiProvider, err = translator.NewProvider(ctx, providerConfig)
+		if err != nil {
+			log.Fatal().Err(err).Msg("Failed to create AI provider")
+		}
+		log.Info().Str("provider", provider).Str("model", model).Msg("Initialized AI provider")
+	} else {
+		log.Info().Msg("Translation is disabled.")
 	}
-	aiProvider, err := translator.NewProvider(ctx, providerConfig)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to create AI provider")
-	}
-	log.Info().Str("provider", provider).Str("model", model).Msg("Initialized AI provider")
 
 	start := time.Now()
 	var allFiles []string
@@ -203,6 +217,19 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 		madeChanges = true
 	}
 
+	// If no-translate flag is set, save any changes from previous steps and exit.
+	if noTranslate {
+		if !dryRun && madeChanges {
+			fileLog.Info().Msg("Saving changes from non-translation operations")
+			if err := poFile.Save(path); err != nil {
+				return 0, fmt.Errorf("failed to save file: %w", err)
+			}
+		} else if madeChanges {
+			fileLog.Info().Msg("DRY RUN: Changes from non-translation operations would have been saved.")
+		}
+		return 0, nil
+	}
+
 	// Step 2: Find untranslated entries
 	type job struct {
 		Index int
@@ -224,7 +251,7 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 		fileLog.Info().Msg("No untranslated entries found")
 		if !dryRun && madeChanges {
 			if err := poFile.Save(path); err != nil {
-				return 0, fmt.Errorf("failed to save file after clearing fuzzy flags: %w", err)
+				return 0, fmt.Errorf("failed to save file after other operations: %w", err)
 			}
 		}
 		return 0, nil

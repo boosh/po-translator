@@ -1,10 +1,17 @@
 package cmd
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/chai2010/gettext-go/po"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"po-translator/internal/translator"
 )
 
 func TestClearFuzzyEntries(t *testing.T) {
@@ -280,4 +287,86 @@ func TestFixUnescapedPercents(t *testing.T) {
 			assert.Equal(t, tc.expectedMsgStr, poFile.Messages[0].MsgStr)
 		})
 	}
+}
+
+// mockProvider is a mock implementation of the translator.Provider interface for testing.
+type mockProvider struct {
+	translationRequests int
+	translatedMessages  int
+}
+
+func (m *mockProvider) Translate(ctx context.Context, texts []string, sourceLang, targetLang string) ([]string, error) {
+	m.translationRequests++
+	m.translatedMessages += len(texts)
+	// Return an empty slice to simulate translation without actual results
+	return make([]string, len(texts)), nil
+}
+
+func (m *mockProvider) String() string {
+	return "mock"
+}
+
+func TestProcessFile_NoTranslate(t *testing.T) {
+	// Setup: Create a temporary directory and a sample .po file
+	tempDir, err := os.MkdirTemp("", "test-process-no-translate")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	poContent := `
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "An untranslated string"
+msgstr ""
+
+msgid "A 10% discount"
+msgstr "Un descuento del 10%"
+`
+	poPath := filepath.Join(tempDir, "test.po")
+	err = os.WriteFile(poPath, []byte(strings.TrimSpace(poContent)), 0644)
+	require.NoError(t, err)
+
+	// Set the global flags for this test case
+	noTranslate = true
+	fix = true
+	// Ensure flags are reset after the test
+	defer func() {
+		noTranslate = false
+		fix = false
+	}()
+
+	var mockAI translator.Provider = &mockProvider{}
+
+	// Run processFile
+	translations, err := processFile(context.Background(), mockAI, poPath, 10)
+	assert.NoError(t, err)
+
+	// Assert that no translations were attempted
+	assert.Equal(t, int64(0), translations, "Expected 0 translations to be reported")
+	assert.Equal(t, 0, mockAI.(*mockProvider).translationRequests, "Expected no calls to the AI provider")
+
+	// Verify the .po file content
+	modifiedPoFile, err := po.LoadFile(poPath)
+	require.NoError(t, err)
+
+	var untranslatedMsg *po.Message
+	var fixedMsg *po.Message
+
+	for i := range modifiedPoFile.Messages {
+		switch modifiedPoFile.Messages[i].MsgId {
+		case "An untranslated string":
+			untranslatedMsg = &modifiedPoFile.Messages[i]
+		case "A 10%% discount": // The msgid is now fixed
+			fixedMsg = &modifiedPoFile.Messages[i]
+		}
+	}
+
+	// Assert that the untranslated string is still untranslated
+	require.NotNil(t, untranslatedMsg, "Expected to find the untranslated message")
+	assert.Equal(t, "", untranslatedMsg.MsgStr, "msgstr should still be empty")
+
+	// Assert that the other string was fixed, meaning non-translation steps ran
+	require.NotNil(t, fixedMsg, "Expected to find the fixed message")
+	assert.Equal(t, "Un descuento del 10%%", fixedMsg.MsgStr)
 }
