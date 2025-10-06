@@ -364,8 +364,9 @@ func logSummary(fileCount int, translationCount, errorCount int64, start time.Ti
 
 func clearFuzzyEntries(poFile *po.File) (fuzzyCount int, madeChanges bool) {
 	for i := range poFile.Messages {
-		// Only clear the translation if the entry is fuzzy AND has a previous
-		// msgid, which indicates a change in the source string.
+		// If an entry is fuzzy and has a previous msgid, it means the source
+		// text has changed slightly. We "accept" the old translation by
+		// removing the fuzzy flag and the previous-id comments, but keeping the msgstr.
 		if poFile.Messages[i].Comment.GetFuzzy() && poFile.Messages[i].Comment.PrevMsgId != "" {
 			var newFlags []string
 			for _, flag := range poFile.Messages[i].Comment.Flags {
@@ -376,7 +377,7 @@ func clearFuzzyEntries(poFile *po.File) (fuzzyCount int, madeChanges bool) {
 			poFile.Messages[i].Comment.Flags = newFlags
 			poFile.Messages[i].Comment.PrevMsgContext = ""
 			poFile.Messages[i].Comment.PrevMsgId = ""
-			poFile.Messages[i].MsgStr = ""
+			// Note: We are intentionally NOT clearing poFile.Messages[i].MsgStr
 			fuzzyCount++
 			madeChanges = true
 		}
