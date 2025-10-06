@@ -61,21 +61,21 @@ A Go CLI tool that manages Django/gettext `.po` file translations using AI servi
     This is the recommended command for a typical Django project. It finds all `django.po` files, fixes common issues, removes duplicates, translates new entries, and reverts files that had no translation changes. It's designed to be run frequently.
 
     ```bash
-    ./po-translator --provider google --model gemini-1.5-flash --fix --dedupe --revert-if-unchanged '*/locale/**/django.po'
+    ./po-translator --provider google --model gemini-flash-latest --fix --dedupe --revert-if-unchanged '*/locale/**/django.po'
     ```
 
 3.  **Perform a dry run:**
     To see what the tool *would* do without making any changes, use the `--dry-run` or `-n` flag.
 
     ```bash
-    ./po-translator --provider=google --model=gemini-1.5-flash -n "locale/**/*.po"
+    ./po-translator --provider=google --model=gemini-flash-latest -n "locale/**/*.po"
     ```
 
 4.  **Test with a limited number of translations:**
     To test the translation process on a small subset of entries, use the `--max-translations` flag.
 
     ```bash
-    ./po-translator --provider=google --model=gemini-1.5-flash --max-translations=5 "locale/**/*.po"
+    ./po-translator --provider=google --model=gemini-flash-latest --max-translations=5 "locale/**/*.po"
     ```
 
 ## Recommended Workflow
@@ -141,7 +141,7 @@ po-translator [flags] <glob-pattern...>
 ### Google Gemini
 -   **Provider Name:** `google`
 -   **Environment Variable:** `GOOGLE_API_KEY` or `GEMINI_API_KEY`
--   **Models:** `gemini-1.5-flash`, `gemini-1.5-pro`, etc.
+-   **Models:** `gemini-flash-latest`, `gemini-2.5-pro`, etc.
 
 ### Anthropic Claude
 -   _(Currently stubbed out and disabled)_
