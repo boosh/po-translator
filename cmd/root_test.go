@@ -23,11 +23,11 @@ type mockProvider struct {
 	translatedMessages  int
 }
 
-func (m *mockProvider) Translate(ctx context.Context, texts []string, sourceLang, targetLang string) ([]string, error) {
+func (m *mockProvider) Translate(ctx context.Context, messages []po.Message, sourceLang, targetLang string, nplurals int) ([]translator.TranslationResult, error) {
 	m.translationRequests++
-	m.translatedMessages += len(texts)
-	// Return an empty slice to simulate translation without actual results
-	return make([]string, len(texts)), nil
+	m.translatedMessages += len(messages)
+	// Return a slice of empty results to simulate translation
+	return make([]translator.TranslationResult, len(messages)), nil
 }
 
 func (m *mockProvider) String() string {

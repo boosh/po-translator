@@ -22,20 +22,15 @@ func NewProvider(ctx context.Context, config Config) (Provider, error) {
 }
 
 // TranslateChunk sends a chunk of entries to an AI provider for translation.
-func TranslateChunk(ctx context.Context, provider Provider, messages []po.Message, filePath string) ([]string, error) {
+func TranslateChunk(ctx context.Context, provider Provider, messages []po.Message, filePath string, nplurals int) ([]TranslationResult, error) {
 	targetLang := ExtractTargetLanguage(filePath)
 	sourceLang := "English" // This could be made configurable later
 
-	var msgids []string
-	for _, msg := range messages {
-		msgids = append(msgids, msg.MsgId)
+	if len(messages) == 0 {
+		return []TranslationResult{}, nil
 	}
 
-	if len(msgids) == 0 {
-		return []string{}, nil
-	}
-
-	translations, err := provider.Translate(ctx, msgids, sourceLang, targetLang)
+	translations, err := provider.Translate(ctx, messages, sourceLang, targetLang, nplurals)
 	if err != nil {
 		return nil, fmt.Errorf("provider failed to translate chunk: %w", err)
 	}

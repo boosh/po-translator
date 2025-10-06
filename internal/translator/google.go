@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chai2010/gettext-go/po"
 	"github.com/google/generative-ai-go/genai"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/api/option"
@@ -50,10 +51,14 @@ func (p *GoogleProvider) String() string {
 }
 
 // Translate sends a translation request to the Google Generative AI API.
-func (p *GoogleProvider) Translate(ctx context.Context, texts []string, sourceLang, targetLang string) ([]string, error) {
-	prompt, err := p.buildPrompt(texts, sourceLang, targetLang)
+func (p *GoogleProvider) Translate(ctx context.Context, messages []po.Message, sourceLang, targetLang string, nplurals int) ([]TranslationResult, error) {
+	prompt, err := p.buildPrompt(messages, sourceLang, targetLang, nplurals)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build prompt: %w", err)
+	}
+
+	if p.config.LogPrompt {
+		log.Debug().Str("provider", "google").Str("prompt", prompt).Msg("Sending prompt to AI")
 	}
 
 	var resp *genai.GenerateContentResponse
@@ -80,7 +85,7 @@ func (p *GoogleProvider) Translate(ctx context.Context, texts []string, sourceLa
 
 	part := resp.Candidates[0].Content.Parts[0]
 	if text, ok := part.(genai.Text); ok {
-		var translations []string
+		var translations []TranslationResult
 		// The response might be wrapped in markdown JSON block
 		cleanJSON := strings.Trim(string(text), " \n\r\t`")
 		if strings.HasPrefix(cleanJSON, "json") {
@@ -93,8 +98,8 @@ func (p *GoogleProvider) Translate(ctx context.Context, texts []string, sourceLa
 			return nil, fmt.Errorf("failed to parse Google response JSON: %w. Response: %s", err, text)
 		}
 
-		if len(translations) != len(texts) {
-			return nil, fmt.Errorf("mismatch between requested (%d) and received (%d) translations", len(texts), len(translations))
+		if len(translations) != len(messages) {
+			return nil, fmt.Errorf("mismatch between requested (%d) and received (%d) translations", len(messages), len(translations))
 		}
 		return translations, nil
 	}
@@ -102,23 +107,72 @@ func (p *GoogleProvider) Translate(ctx context.Context, texts []string, sourceLa
 	return nil, fmt.Errorf("unexpected part type in Google response: %T", part)
 }
 
-func (p *GoogleProvider) buildPrompt(texts []string, sourceLang, targetLang string) (string, error) {
-	jsonTexts, err := json.Marshal(texts)
+// promptEntry is a struct used for marshalling message data for the prompt.
+type promptEntry struct {
+	MsgContext  string `json:"msgctxt,omitempty"`
+	MsgId       string `json:"msgid"`
+	MsgIdPlural string `json:"msgid_plural,omitempty"`
+	IsPlural    bool   `json:"is_plural"`
+	Comment     string `json:"comment,omitempty"`
+	TargetForms int    `json:"target_forms,omitempty"`
+}
+
+func (p *GoogleProvider) buildPrompt(messages []po.Message, sourceLang, targetLang string, nplurals int) (string, error) {
+	promptEntries := make([]promptEntry, len(messages))
+	for i, msg := range messages {
+		// Extract developer comments from the structured fields.
+		var devComments []string
+		if msg.Comment.TranslatorComment != "" {
+			devComments = append(devComments, msg.Comment.TranslatorComment)
+		}
+		if msg.Comment.ExtractedComment != "" {
+			devComments = append(devComments, msg.Comment.ExtractedComment)
+		}
+
+		promptEntries[i] = promptEntry{
+			MsgContext:  msg.MsgContext,
+			MsgId:       msg.MsgId,
+			MsgIdPlural: msg.MsgIdPlural,
+			IsPlural:    msg.MsgIdPlural != "",
+			Comment:     strings.Join(devComments, " "),
+			TargetForms: nplurals,
+		}
+	}
+
+	jsonEntries, err := json.MarshalIndent(promptEntries, "", "  ")
 	if err != nil {
 		return "", err
 	}
 
-	return fmt.Sprintf(`You are translating strings for a Django web application from %s to %s.
+	return fmt.Sprintf(`You are a professional translator for a software application.
+Your task is to translate a list of messages from %s to %s.
 
-IMPORTANT:
-- Preserve ALL placeholders exactly: %%(name)s, {count}, %%s, etc.
-- Maintain the same tone and formality as the source.
-- Return ONLY a valid JSON array of translated strings in the same order.
-- Each element in the array should be a string.
+You will be given a JSON array of message objects. Each object contains:
+- "msgctxt": A context string, which might be empty.
+- "msgid": The primary message string to translate.
+- "msgid_plural": The plural version of the message. This will be empty if the message is not plural.
+- "is_plural": A boolean indicating if the message has a plural form.
+- "comment": Developer comments for extra context.
+- "target_forms": The number of plural forms required for the target language (%s).
 
-Source strings to translate:
+RULES:
+1.  RETURN ONLY A VALID JSON ARRAY. The array must have the same number of elements as the input array.
+2.  Each element in the output array must be a JSON object with the following structure:
+    {
+      "msgstr": "...",
+      "msgstr_plural": ["...", "..."]
+    }
+3.  For non-plural messages ("is_plural": false), "msgstr_plural" must be an empty array: [].
+4.  For plural messages ("is_plural": true), "msgstr_plural" must be an array of strings with exactly "target_forms" elements.
+    - The first element is the translation for "one" (or the singular form in the target language).
+    - Subsequent elements are for "two", "few", "many", etc., as required by the language's pluralization rules.
+5.  Preserve ALL original placeholders, like %%(name)s, {count}, %%s, etc., exactly as they appear in the source.
+6.  Maintain the tone and formality of the source text.
+7.  Do not include the original English text in your response. Only provide the translations.
+
+MESSAGES TO TRANSLATE:
 %s
 
-Return format (JSON array of strings):
-["translated string 1", "translated string 2", ...]`, sourceLang, targetLang, string(jsonTexts)), nil
+Your response must be a JSON array of objects in the specified format.
+`, sourceLang, targetLang, targetLang, string(jsonEntries)), nil
 }

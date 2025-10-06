@@ -9,6 +9,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,7 @@ var (
 	noTranslate       bool
 	revertIfUnchanged bool
 	yes               bool
+	logPrompt         bool
 )
 
 var rootCmd = &cobra.Command{
@@ -76,6 +78,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&noTranslate, "no-translate", false, "Disable translation and only perform other operations (e.g., --fix, --dedupe)")
 	rootCmd.Flags().BoolVar(&revertIfUnchanged, "revert-if-unchanged", false, "Revert .po file to its git HEAD version if no new translations were made")
 	rootCmd.Flags().BoolVarP(&yes, "yes", "y", false, "Automatically answer yes to all prompts and skip confirmation")
+	rootCmd.Flags().BoolVar(&logPrompt, "log-prompt", false, "Log the full prompt sent to the AI provider (for debugging)")
 }
 
 func Execute() {
@@ -226,6 +229,7 @@ func initProvider(ctx context.Context) (translator.Provider, error) {
 		APIKey:      apiKey,
 		Temperature: temperature,
 		MaxRetries:  maxRetries,
+		LogPrompt:   logPrompt,
 	}
 	p, err := newProvider(ctx, providerConfig)
 	if err != nil {
@@ -275,10 +279,6 @@ func preprocessFile(path string) ([]po.Message, error) {
 		if err := savePoFile(poFile, path); err != nil {
 			return nil, fmt.Errorf("failed to save file after pre-processing: %w", err)
 		}
-		// After saving, reload the file to ensure our in-memory representation
-		// matches the canonical version on disk. This prevents issues where the
-		// gettext library's internal state after modifications differs from its
-		// state after a fresh parse.
 		reloadedPoFile, err := po.LoadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("failed to reload .po file after saving: %w", err)
@@ -288,7 +288,7 @@ func preprocessFile(path string) ([]po.Message, error) {
 
 	var untranslated []po.Message
 	for _, msg := range poFile.Messages {
-		if msg.MsgId != "" && msg.MsgStr == "" {
+		if !isMessageTranslated(msg) {
 			untranslated = append(untranslated, msg)
 		}
 	}
@@ -305,6 +305,42 @@ func preprocessFile(path string) ([]po.Message, error) {
 	return untranslated, nil
 }
 
+func isMessageTranslated(msg po.Message) bool {
+	if msg.MsgId == "" {
+		return true // Skip empty msgids
+	}
+	if msg.MsgIdPlural == "" {
+		return msg.MsgStr != "" // Simple case: no plural
+	}
+	if len(msg.MsgStrPlural) == 0 {
+		return false // Plural form exists but no translations
+	}
+	for _, s := range msg.MsgStrPlural {
+		if s == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func getNPlurals(header po.Header) int {
+	if header.PluralForms == "" {
+		return 2 // Default for many languages
+	}
+	parts := strings.Split(header.PluralForms, ";")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "nplurals=") {
+			valStr := strings.TrimPrefix(part, "nplurals=")
+			n, err := strconv.Atoi(valStr)
+			if err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return 2 // Default if parsing fails
+}
+
 func translateFile(ctx context.Context, provider translator.Provider, path string, chunkSize int) (int64, error) {
 	fileLog := log.With().Str("file", path).Logger()
 	fileLog.Info().Msg("Translating file")
@@ -317,7 +353,7 @@ func translateFile(ctx context.Context, provider translator.Provider, path strin
 	type job struct{ Index int; Msg po.Message }
 	var untranslatedJobs []job
 	for i, msg := range poFile.Messages {
-		if msg.MsgId != "" && msg.MsgStr == "" {
+		if !isMessageTranslated(msg) {
 			untranslatedJobs = append(untranslatedJobs, job{Index: i, Msg: msg})
 		}
 	}
@@ -349,14 +385,18 @@ func translateFile(ctx context.Context, provider translator.Provider, path strin
 			msgChunk[i] = j.Msg
 		}
 
-		translations, err := translator.TranslateChunk(ctx, provider, msgChunk, path)
+		nplurals := getNPlurals(poFile.MimeHeader)
+		translations, err := translator.TranslateChunk(ctx, provider, msgChunk, path, nplurals)
 		if err != nil {
 			return totalTranslated, fmt.Errorf("translation error in chunk %d-%d: %w", i+1, end, err)
 		}
 
 		for j, translation := range translations {
 			originalIndex := jobChunk[j].Index
-			poFile.Messages[originalIndex].MsgStr = translation
+			poFile.Messages[originalIndex].MsgStr = translation.MsgStr
+			if len(translation.PluralStr) > 0 {
+				poFile.Messages[originalIndex].MsgStrPlural = translation.PluralStr
+			}
 		}
 		totalTranslated += int64(len(translations))
 
@@ -389,17 +429,13 @@ func clearFuzzyEntries(poFile *po.File) (fuzzyCount int, madeChanges bool) {
 			continue
 		}
 
-		// If the msgid has changed (ignoring whitespace), the old translation is invalid.
-		// Otherwise, we can "accept" the old translation for the new msgid.
 		currentMsgId := strings.TrimSpace(poFile.Messages[i].MsgId)
 		prevMsgId := strings.TrimSpace(poFile.Messages[i].Comment.PrevMsgId)
 
 		if currentMsgId != prevMsgId {
-			poFile.Messages[i].MsgStr = "" // Clear outdated translation
+			poFile.Messages[i].MsgStr = ""
 		}
-		// If they are the same, we preserve the msgstr.
 
-		// Always remove the fuzzy flag and previous-id comments when we process it.
 		var newFlags []string
 		for _, flag := range poFile.Messages[i].Comment.Flags {
 			if flag != "fuzzy" {
