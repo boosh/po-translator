@@ -458,3 +458,75 @@ msgstr "Hola"
 	finalTimestamp := finalPoFile.MimeHeader.PORevisionDate
 	assert.Equal(t, originalTimestamp, finalTimestamp, "Expected timestamp to be restored from git")
 }
+
+func TestProcessFile_DryRun(t *testing.T) {
+	// Setup: Create a temporary directory and a sample .po file with a fixable issue
+	tempDir, err := os.MkdirTemp("", "test-dry-run")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	poContent := `
+msgid "A 10% discount"
+msgstr "Un descuento del 10%"`
+	poPath := filepath.Join(tempDir, "test.po")
+	err = os.WriteFile(poPath, []byte(strings.TrimSpace(poContent)), 0644)
+	require.NoError(t, err)
+
+	originalContent, err := os.ReadFile(poPath)
+	require.NoError(t, err)
+
+	// Set the global flags for this test case
+	dryRun = true
+	fix = true
+	defer func() {
+		dryRun = false
+		fix = false
+	}()
+
+	// Run processFile
+	_, err = processFile(context.Background(), nil, poPath, 10)
+	assert.NoError(t, err)
+
+	// Verify the file content has not changed
+	finalContent, err := os.ReadFile(poPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(originalContent), string(finalContent), "File content should not change in dry-run mode")
+}
+
+func TestProcessFile_MaxTranslations(t *testing.T) {
+	// Setup: Create a temporary directory and a .po file with multiple untranslated strings
+	tempDir, err := os.MkdirTemp("", "test-max-translations")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	poContent := `
+msgid "string1"
+msgstr ""
+
+msgid "string2"
+msgstr ""
+
+msgid "string3"
+msgstr ""
+`
+	poPath := filepath.Join(tempDir, "test.po")
+	err = os.WriteFile(poPath, []byte(strings.TrimSpace(poContent)), 0644)
+	require.NoError(t, err)
+
+	// Set the global flags for this test case
+	maxTranslations = 2
+	defer func() {
+		maxTranslations = 0 // Reset to default
+	}()
+
+	mockAI := &mockProvider{}
+	var provider translator.Provider = mockAI
+
+	// Run processFile
+	_, err = processFile(context.Background(), provider, poPath, 10)
+	assert.NoError(t, err)
+
+	// Assert that the AI provider was called with the correct number of messages
+	assert.Equal(t, 2, mockAI.translatedMessages, "Expected to translate only the max number of messages")
+	assert.Equal(t, 1, mockAI.translationRequests, "Expected only one chunk request for the limited set of messages")
+}
