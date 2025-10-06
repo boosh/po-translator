@@ -8,8 +8,8 @@ import (
 
 // TranslationResult holds the translated strings for a single message.
 type TranslationResult struct {
-	MsgStr    string
-	PluralStr []string
+	MsgStr    string   `json:"msgstr"`
+	PluralStr []string `json:"msgstr_plural"`
 }
 
 // Provider is the interface that all AI providers must implement.

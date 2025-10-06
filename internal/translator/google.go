@@ -58,7 +58,7 @@ func (p *GoogleProvider) Translate(ctx context.Context, messages []po.Message, s
 	}
 
 	if p.config.LogPrompt {
-		log.Debug().Str("provider", "google").Str("prompt", prompt).Msg("Sending prompt to AI")
+		log.Info().Str("provider", "google").Str("prompt", prompt).Msg("Sending prompt to AI")
 	}
 
 	var resp *genai.GenerateContentResponse
