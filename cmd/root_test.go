@@ -46,51 +46,73 @@ func unpatchOsExit() {
 }
 
 func TestClearFuzzyEntries(t *testing.T) {
-	t.Run("accepts fuzzy entry with previous msgid by preserving msgstr", func(t *testing.T) {
+	t.Run("preserves translation when msgid only has whitespace changes", func(t *testing.T) {
 		poFile := &po.File{
 			Messages: []po.Message{
 				{
 					Comment: po.Comment{
-						Flags:     []string{"fuzzy", "python-format"},
-						PrevMsgId: "Old untranslated string",
+						Flags:     []string{"fuzzy"},
+						PrevMsgId: "  hello world  ",
 					},
-					MsgId:  "New untranslated string",
-					MsgStr: "Old translated string",
+					MsgId:  "hello world",
+					MsgStr: "hola mundo",
 				},
 			},
 		}
 		expectedMsgStr := poFile.Messages[0].MsgStr
-
 		fuzzyCount, madeChanges := clearFuzzyEntries(poFile)
 
-		assert.True(t, madeChanges, "Expected changes to be made when accepting a fuzzy entry")
-		assert.Equal(t, 1, fuzzyCount, "Expected one fuzzy entry to be processed")
+		assert.True(t, madeChanges, "Should report changes when processing a fuzzy entry")
+		assert.Equal(t, 1, fuzzyCount, "Should process one fuzzy entry")
 		processedMsg := poFile.Messages[0]
-		assert.NotContains(t, processedMsg.Comment.Flags, "fuzzy", "Fuzzy flag should have been removed")
-		assert.Contains(t, processedMsg.Comment.Flags, "python-format", "Other flags should be preserved")
-		assert.Empty(t, processedMsg.Comment.PrevMsgId, "Previous message ID should be cleared")
-		assert.Equal(t, expectedMsgStr, processedMsg.MsgStr, "Message string should be preserved")
+		assert.NotContains(t, processedMsg.Comment.Flags, "fuzzy", "Fuzzy flag should be removed")
+		assert.Empty(t, processedMsg.Comment.PrevMsgId, "PrevMsgId should be cleared")
+		assert.Equal(t, expectedMsgStr, processedMsg.MsgStr, "Translation should be preserved")
 	})
 
-	t.Run("ignores fuzzy entry without previous msgid", func(t *testing.T) {
+	t.Run("clears translation when msgid has substantive changes", func(t *testing.T) {
+		poFile := &po.File{
+			Messages: []po.Message{
+				{
+					Comment: po.Comment{
+						Flags:     []string{"fuzzy"},
+						PrevMsgId: "hello world",
+					},
+					MsgId:  "hello new world",
+					MsgStr: "hola mundo",
+				},
+			},
+		}
+		fuzzyCount, madeChanges := clearFuzzyEntries(poFile)
+
+		assert.True(t, madeChanges, "Should report changes when processing a fuzzy entry")
+		assert.Equal(t, 1, fuzzyCount, "Should process one fuzzy entry")
+		processedMsg := poFile.Messages[0]
+		assert.NotContains(t, processedMsg.Comment.Flags, "fuzzy", "Fuzzy flag should be removed")
+		assert.Empty(t, processedMsg.Comment.PrevMsgId, "PrevMsgId should be cleared")
+		assert.Empty(t, processedMsg.MsgStr, "Translation should be cleared for a changed msgid")
+	})
+
+	t.Run("ignores fuzzy entry without a previous msgid", func(t *testing.T) {
 		poFile := &po.File{
 			Messages: []po.Message{
 				{
 					Comment: po.Comment{Flags: []string{"fuzzy"}},
-					MsgId:   "A string that was just marked fuzzy",
-					MsgStr:  "A translation that should be kept",
+					MsgId:   "some string",
+					MsgStr:  "some translation",
 				},
 			},
 		}
 		originalMsgStr := poFile.Messages[0].MsgStr
+		originalFlags := poFile.Messages[0].Comment.Flags
 
 		fuzzyCount, madeChanges := clearFuzzyEntries(poFile)
 
 		assert.False(t, madeChanges, "Should not make changes if fuzzy entry has no PrevMsgId")
 		assert.Equal(t, 0, fuzzyCount, "Should not count this as a processed entry")
 		preservedMsg := poFile.Messages[0]
-		assert.Contains(t, preservedMsg.Comment.Flags, "fuzzy", "Fuzzy flag should be preserved")
-		assert.Equal(t, originalMsgStr, preservedMsg.MsgStr, "Translation should be preserved")
+		assert.Equal(t, originalFlags, preservedMsg.Comment.Flags, "Flags should be untouched")
+		assert.Equal(t, originalMsgStr, preservedMsg.MsgStr, "Translation should be untouched")
 	})
 }
 

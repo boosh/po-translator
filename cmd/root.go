@@ -364,23 +364,33 @@ func logSummary(fileCount int, translationCount, errorCount int64, start time.Ti
 
 func clearFuzzyEntries(poFile *po.File) (fuzzyCount int, madeChanges bool) {
 	for i := range poFile.Messages {
-		// If an entry is fuzzy and has a previous msgid, it means the source
-		// text has changed slightly. We "accept" the old translation by
-		// removing the fuzzy flag and the previous-id comments, but keeping the msgstr.
-		if poFile.Messages[i].Comment.GetFuzzy() && poFile.Messages[i].Comment.PrevMsgId != "" {
-			var newFlags []string
-			for _, flag := range poFile.Messages[i].Comment.Flags {
-				if flag != "fuzzy" {
-					newFlags = append(newFlags, flag)
-				}
-			}
-			poFile.Messages[i].Comment.Flags = newFlags
-			poFile.Messages[i].Comment.PrevMsgContext = ""
-			poFile.Messages[i].Comment.PrevMsgId = ""
-			// Note: We are intentionally NOT clearing poFile.Messages[i].MsgStr
-			fuzzyCount++
-			madeChanges = true
+		if !poFile.Messages[i].Comment.GetFuzzy() || poFile.Messages[i].Comment.PrevMsgId == "" {
+			continue
 		}
+
+		// If the msgid has changed (ignoring whitespace), the old translation is invalid.
+		// Otherwise, we can "accept" the old translation for the new msgid.
+		currentMsgId := strings.TrimSpace(poFile.Messages[i].MsgId)
+		prevMsgId := strings.TrimSpace(poFile.Messages[i].Comment.PrevMsgId)
+
+		if currentMsgId != prevMsgId {
+			poFile.Messages[i].MsgStr = "" // Clear outdated translation
+		}
+		// If they are the same, we preserve the msgstr.
+
+		// Always remove the fuzzy flag and previous-id comments when we process it.
+		var newFlags []string
+		for _, flag := range poFile.Messages[i].Comment.Flags {
+			if flag != "fuzzy" {
+				newFlags = append(newFlags, flag)
+			}
+		}
+		poFile.Messages[i].Comment.Flags = newFlags
+		poFile.Messages[i].Comment.PrevMsgContext = ""
+		poFile.Messages[i].Comment.PrevMsgId = ""
+
+		fuzzyCount++
+		madeChanges = true
 	}
 	return fuzzyCount, madeChanges
 }
