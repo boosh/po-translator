@@ -393,6 +393,69 @@ msgstr ""
 	assert.Equal(t, expectedMsgStr, finalMsg.MsgStr)
 }
 
+func TestPreprocessFile_FixDoesNotClearTranslation(t *testing.T) {
+	// This test is designed to replicate the user's bug report, where a file
+	// containing a correctly escaped '%%' has its translation cleared when
+	// the --fix command is run on the file due to another entry needing a fix.
+	tempDir, err := os.MkdirTemp("", "test-fix-clears-str")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	// This content contains two messages:
+	// 1. The user's message, which is already correct.
+	// 2. A "trigger" message with an unescaped '%' that needs fixing.
+	poContent := `
+# User's entry, which is correct
+#, python-format
+msgid ""
+"- Our new blend is 20%% stronger\n"
+"- It's sourced from a family-run farm in Colombia\n"
+"- Mention the free shipping this week"
+msgstr ""
+"- Nuestra nueva mezcla es un 20%% más fuerte\n"
+"- Proviene de una granja familiar en Colombia\n"
+"- Menciona el envío gratuito esta semana"
+
+# Trigger entry that needs fixing
+msgid "This is a 10% discount"
+msgstr "Este es un descuento del 10%"
+`
+	poPath := filepath.Join(tempDir, "test.po")
+	initialPo, err := po.Load([]byte(poContent))
+	require.NoError(t, err)
+	err = savePoFile(initialPo, poPath)
+	require.NoError(t, err)
+
+	// Set the global `fix` flag for this test case
+	fix = true
+	defer func() {
+		fix = false
+	}()
+
+	// Run preprocessFile, which contains the logic for the --fix flag
+	_, _, err = preprocessFile(poPath)
+	assert.NoError(t, err)
+
+	// Load the final .po file to inspect its contents
+	finalPoFile, err := po.LoadFile(poPath)
+	require.NoError(t, err)
+
+	// Isolate the user's message
+	var userMsg *po.Message
+	for i := range finalPoFile.Messages {
+		if strings.Contains(finalPoFile.Messages[i].MsgId, "20%%") {
+			userMsg = &finalPoFile.Messages[i]
+			break
+		}
+	}
+	require.NotNil(t, userMsg, "Could not find the user's message in the processed file")
+
+	// The msgstr should NOT be empty. This is the core of the bug report.
+	expectedMsgStr := "- Nuestra nueva mezcla es un 20%% más fuerte\n- Proviene de una granja familiar en Colombia\n- Menciona el envío gratuito esta semana"
+	assert.NotEmpty(t, userMsg.MsgStr, "The user's msgstr should not have been cleared")
+	assert.Equal(t, expectedMsgStr, userMsg.MsgStr, "The user's translation should be preserved")
+}
+
 func TestPreprocessFile_RevertIfUnchanged(t *testing.T) {
 	// Skip test if git is not installed
 	if _, err := exec.LookPath("git"); err != nil {
