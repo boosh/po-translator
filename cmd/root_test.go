@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +16,34 @@ import (
 
 	"po-translator/internal/translator"
 )
+
+// mockProvider is a mock implementation of the translator.Provider interface for testing.
+type mockProvider struct {
+	translationRequests int
+	translatedMessages  int
+}
+
+func (m *mockProvider) Translate(ctx context.Context, texts []string, sourceLang, targetLang string) ([]string, error) {
+	m.translationRequests++
+	m.translatedMessages += len(texts)
+	// Return an empty slice to simulate translation without actual results
+	return make([]string, len(texts)), nil
+}
+
+func (m *mockProvider) String() string {
+	return "mock"
+}
+
+// Helper functions to patch os.Exit for testing
+var osExit = os.Exit
+
+func patchOsExit(fn func(int)) {
+	osExit = fn
+}
+
+func unpatchOsExit() {
+	osExit = os.Exit
+}
 
 func TestClearFuzzyEntries(t *testing.T) {
 	// 1. Create a po.File struct with a fuzzy message
@@ -293,23 +320,6 @@ func TestFixUnescapedPercents(t *testing.T) {
 	}
 }
 
-// mockProvider is a mock implementation of the translator.Provider interface for testing.
-type mockProvider struct {
-	translationRequests int
-	translatedMessages  int
-}
-
-func (m *mockProvider) Translate(ctx context.Context, texts []string, sourceLang, targetLang string) ([]string, error) {
-	m.translationRequests++
-	m.translatedMessages += len(texts)
-	// Return an empty slice to simulate translation without actual results
-	return make([]string, len(texts)), nil
-}
-
-func (m *mockProvider) String() string {
-	return "mock"
-}
-
 func TestProcessFile_NoTranslate(t *testing.T) {
 	// Setup: Create a temporary directory and a sample .po file
 	tempDir, err := os.MkdirTemp("", "test-process-no-translate")
@@ -375,14 +385,14 @@ msgstr "Un descuento del 10%"
 	assert.Equal(t, "Un descuento del 10%%", fixedMsg.MsgStr)
 }
 
-func TestProcessFile_RestoreTimestamp(t *testing.T) {
+func TestProcessFile_RevertIfUnchanged(t *testing.T) {
 	// Skip test if git is not installed
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found, skipping test")
 	}
 
 	// Setup: Create a temporary git repository
-	tempDir, err := os.MkdirTemp("", "test-restore-timestamp")
+	tempDir, err := os.MkdirTemp("", "test-revert-if-unchanged")
 	require.NoError(t, err)
 	defer os.RemoveAll(tempDir)
 
@@ -398,31 +408,32 @@ func TestProcessFile_RestoreTimestamp(t *testing.T) {
 	runCmd("config", "user.email", "test@example.com")
 
 	// 1. Create and commit the initial .po file
-	originalTimestamp := "2023-10-27 10:00:00+00:00"
-	initialPoContent := fmt.Sprintf(`
+	initialPoContent := `
 msgid ""
 msgstr ""
-"PO-Revision-Date: %s\n"
+"PO-Revision-Date: 2023-10-27 10:00:00+00:00\n"
 "Language: en\n"
 
 msgid "Hello"
 msgstr "Hola"
-`, originalTimestamp)
-
+`
 	poPath := filepath.Join(tempDir, "test.po")
 	err = os.WriteFile(poPath, []byte(strings.TrimSpace(initialPoContent)), 0644)
 	require.NoError(t, err)
 
-	runCmd("add", "test.po")
+	runCmd("add", poPath)
 	runCmd("commit", "-m", "Initial commit")
 
+	// Store original content for later comparison
+	originalContent, err := os.ReadFile(poPath)
+	require.NoError(t, err)
+
 	// 2. Modify the file to simulate Django's makemessages
-	// (new timestamp, added duplicate entry)
-	newTimestamp := "2023-10-28 12:00:00+00:00"
-	modifiedPoContent := fmt.Sprintf(`
+	// (new timestamp, added duplicate entry, maybe some whitespace changes)
+	modifiedPoContent := `
 msgid ""
 msgstr ""
-"PO-Revision-Date: %s\n"
+"PO-Revision-Date: 2023-10-28 12:00:00+00:00\n"
 "Language: en\n"
 
 msgid "Hello"
@@ -431,17 +442,17 @@ msgstr "Hola"
 # This is a duplicate that should be removed
 msgid "Hello"
 msgstr "Hola"
-`, newTimestamp)
 
+`
 	err = os.WriteFile(poPath, []byte(strings.TrimSpace(modifiedPoContent)), 0644)
 	require.NoError(t, err)
 
-	// 3. Run processFile with --dedupe and --restore-timestamp
+	// 3. Run processFile with --dedupe and --revert-if-unchanged
 	dedupe = true
-	restoreTimestamp = true
+	revertIfUnchanged = true
 	defer func() {
 		dedupe = false
-		restoreTimestamp = false
+		revertIfUnchanged = false
 	}()
 
 	// No AI provider needed as no new translations are expected
@@ -450,15 +461,66 @@ msgstr "Hola"
 	assert.Equal(t, int64(0), translations)
 
 	// 4. Verify the final state of the .po file
-	finalPoFile, err := po.LoadFile(poPath)
+	finalContent, err := os.ReadFile(poPath)
 	require.NoError(t, err)
 
-	// Check that the duplicate was removed
-	assert.Len(t, finalPoFile.Messages, 1, "Expected duplicate message to be removed")
+	// Check that the file content was reverted to its original state
+	assert.Equal(t, string(originalContent), string(finalContent), "Expected file content to be reverted to git HEAD")
+}
 
-	// Check that the timestamp was restored
-	finalTimestamp := finalPoFile.MimeHeader.PORevisionDate
-	assert.Equal(t, originalTimestamp, finalTimestamp, "Expected timestamp to be restored from git")
+func TestRunWithConfirmation_YesFlag(t *testing.T) {
+	// Setup: Create a temporary directory and a .po file with untranslated strings
+	tempDir, err := os.MkdirTemp("", "test-confirmation-yes")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	// Change working directory to the temp dir for the test
+	originalWd, err := os.Getwd()
+	require.NoError(t, err)
+	err = os.Chdir(tempDir)
+	require.NoError(t, err)
+	defer os.Chdir(originalWd)
+
+	poContent := `
+msgid "string1"
+msgstr ""
+`
+	poFileName := "test.po"
+	err = os.WriteFile(poFileName, []byte(strings.TrimSpace(poContent)), 0644)
+	require.NoError(t, err)
+
+	// Set the global flags for this test case
+	yes = true
+	provider = "google" // Mock provider will be injected, but flag needs to be set
+	model = "gemini-pro"
+	defer func() {
+		yes = false
+		provider = ""
+		model = ""
+	}()
+
+	// Mock the AI provider factory to return our mock provider
+	originalNewProvider := newProvider
+	mockAI := &mockProvider{}
+	newProvider = func(ctx context.Context, config translator.Config) (translator.Provider, error) {
+		return mockAI, nil
+	}
+	defer func() { newProvider = originalNewProvider }()
+
+	// Capture os.Exit calls
+	var exitCode int
+	osExit = func(code int) {
+		exitCode = code
+	}
+	patchOsExit(osExit)
+	defer unpatchOsExit()
+
+	// Set command-line arguments and run the root command
+	rootCmd.SetArgs([]string{poFileName})
+	Execute()
+
+	assert.Equal(t, 0, exitCode, "Expected the command to exit successfully")
+	assert.Equal(t, 1, mockAI.translatedMessages, "Expected translation to proceed when --yes is used")
 }
 
 func TestProcessFile_DryRun(t *testing.T) {
@@ -591,4 +653,58 @@ msgstr "Captcha"
 	}
 
 	assert.Equal(t, expectedOrder, foundMsgids, "The messages in the output file are not correctly sorted by msgid")
+}
+
+func TestSortMessages(t *testing.T) {
+	t.Run("sorts unsorted messages", func(t *testing.T) {
+		// Create a .po file with an unsorted list of messages.
+		// The MimeHeader is separate and not part of the Messages slice.
+		poFile := &po.File{
+			Messages: []po.Message{
+				{MsgId: "zebra"},
+				{MsgId: "apple"},
+				{MsgId: "banana"},
+			},
+		}
+
+		// Apply the sorting function.
+		changed := sortMessages(poFile)
+
+		// Assert that changes were made.
+		assert.True(t, changed, "sortMessages should report that it made changes")
+
+		// Assert that the messages are now in the correct sorted order.
+		assert.Equal(t, "apple", poFile.Messages[0].MsgId)
+		assert.Equal(t, "banana", poFile.Messages[1].MsgId)
+		assert.Equal(t, "zebra", poFile.Messages[2].MsgId)
+	})
+
+	t.Run("reports no changes for already sorted messages", func(t *testing.T) {
+		// Create a .po file that is already sorted.
+		poFile := &po.File{
+			Messages: []po.Message{
+				{MsgId: "apple"},
+				{MsgId: "banana"},
+				{MsgId: "zebra"},
+			},
+		}
+
+		// Apply the sorting function.
+		changed := sortMessages(poFile)
+
+		// Assert that no changes were made.
+		assert.False(t, changed, "sortMessages should not report changes for an already sorted file")
+	})
+
+	t.Run("handles empty and single-item slices", func(t *testing.T) {
+		// Test with an empty slice
+		emptyPoFile := &po.File{Messages: []po.Message{}}
+		changed := sortMessages(emptyPoFile)
+		assert.False(t, changed, "sortMessages should not report changes for an empty slice")
+
+		// Test with a single item
+		singleItemPoFile := &po.File{Messages: []po.Message{{MsgId: "one"}}}
+		changed = sortMessages(singleItemPoFile)
+		assert.False(t, changed, "sortMessages should not report changes for a single-item slice")
+	})
 }

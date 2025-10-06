@@ -17,7 +17,6 @@ func setupGitRepo(t *testing.T) (string, func()) {
 	tempDir, err := os.MkdirTemp("", "test-git-repo")
 	require.NoError(t, err)
 
-	// Function to run git commands
 	runCmd := func(args ...string) {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = tempDir
@@ -36,78 +35,55 @@ func setupGitRepo(t *testing.T) (string, func()) {
 	return tempDir, cleanup
 }
 
-func TestGetRevisionDateFromGit(t *testing.T) {
+func TestRevertFile(t *testing.T) {
 	// Skip test if git is not installed
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found, skipping test")
 	}
 
-	t.Run("successfully retrieves timestamp", func(t *testing.T) {
+	t.Run("successfully reverts a modified file", func(t *testing.T) {
 		tempDir, cleanup := setupGitRepo(t)
 		defer cleanup()
 
-		poContent := `
-msgid ""
-msgstr ""
-"PO-Revision-Date: 2023-01-01 12:00+0000\n"
-"Language: en\n"
-`
-		poPath := filepath.Join(tempDir, "test.po")
-		err := os.WriteFile(poPath, []byte(strings.TrimSpace(poContent)), 0644)
+		originalContent := "This is the original content."
+		filePath := filepath.Join(tempDir, "testfile.txt")
+		err := os.WriteFile(filePath, []byte(originalContent), 0644)
 		require.NoError(t, err)
 
-		// Add and commit the file
 		runCmd := func(args ...string) {
 			cmd := exec.Command("git", args...)
 			cmd.Dir = tempDir
 			err := cmd.Run()
 			require.NoError(t, err)
 		}
-		runCmd("add", "test.po")
+		runCmd("add", "testfile.txt")
 		runCmd("commit", "-m", "Initial commit")
 
-		timestamp, err := GetRevisionDateFromGit(poPath)
+		// Modify the file
+		modifiedContent := "This is the modified content."
+		err = os.WriteFile(filePath, []byte(modifiedContent), 0644)
+		require.NoError(t, err)
+
+		// Revert the file
+		err = RevertFile(filePath)
 		assert.NoError(t, err)
-		assert.Equal(t, "2023-01-01 12:00+0000", timestamp)
+
+		// Check that the file content is restored
+		finalContent, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+		assert.Equal(t, originalContent, string(finalContent))
 	})
 
 	t.Run("returns error if file is not in git", func(t *testing.T) {
 		tempDir, cleanup := setupGitRepo(t)
 		defer cleanup()
 
-		poPath := filepath.Join(tempDir, "untracked.po")
-		err := os.WriteFile(poPath, []byte("test content"), 0644)
+		filePath := filepath.Join(tempDir, "untracked.txt")
+		err := os.WriteFile(filePath, []byte("test content"), 0644)
 		require.NoError(t, err)
 
-		_, err = GetRevisionDateFromGit(poPath)
+		err = RevertFile(filePath)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "could not get file from git HEAD")
-	})
-
-	t.Run("returns error if timestamp is not found", func(t *testing.T) {
-		tempDir, cleanup := setupGitRepo(t)
-		defer cleanup()
-
-		poContent := `
-msgid ""
-msgstr ""
-"Language: en\\n"
-`
-		poPath := filepath.Join(tempDir, "test.po")
-		err := os.WriteFile(poPath, []byte(strings.TrimSpace(poContent)), 0644)
-		require.NoError(t, err)
-
-		runCmd := func(args ...string) {
-			cmd := exec.Command("git", args...)
-			cmd.Dir = tempDir
-			err := cmd.Run()
-			require.NoError(t, err)
-		}
-		runCmd("add", "test.po")
-		runCmd("commit", "-m", "Initial commit")
-
-		_, err = GetRevisionDateFromGit(poPath)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "PO-Revision-Date not found")
+		assert.Contains(t, err.Error(), "could not revert file")
 	})
 }

@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +24,8 @@ import (
 	"po-translator/internal/logger"
 	"po-translator/internal/translator"
 )
+
+var newProvider = translator.NewProvider
 
 var (
 	logLevel         string
@@ -39,7 +43,8 @@ var (
 	fix              bool
 	maxTranslations  int
 	noTranslate      bool
-	restoreTimestamp bool
+	revertIfUnchanged bool
+	yes               bool
 )
 
 var rootCmd = &cobra.Command{
@@ -69,7 +74,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&fix, "fix", false, "Fix unescaped percent signs in msgid and msgstr")
 	rootCmd.Flags().IntVar(&maxTranslations, "max-translations", 0, "Max number of entries to translate per file (0 for no limit)")
 	rootCmd.Flags().BoolVar(&noTranslate, "no-translate", false, "Disable translation and only perform other operations (e.g., --fix, --dedupe)")
-	rootCmd.Flags().BoolVar(&restoreTimestamp, "restore-timestamp", false, "Restore PO-Revision-Date from git if no translations were made")
+	rootCmd.Flags().BoolVar(&revertIfUnchanged, "revert-if-unchanged", false, "Revert .po file to its git HEAD version if no new translations were made")
+	rootCmd.Flags().BoolVarP(&yes, "yes", "y", false, "Automatically answer yes to all prompts and skip confirmation")
 }
 
 func Execute() {
@@ -100,7 +106,7 @@ func run(cmd *cobra.Command, args []string) {
 			Temperature: temperature,
 			MaxRetries:  maxRetries,
 		}
-		aiProvider, err = translator.NewProvider(ctx, providerConfig)
+		aiProvider, err = newProvider(ctx, providerConfig)
 		if err != nil {
 			log.Fatal().Err(err).Msg("Failed to create AI provider")
 		}
@@ -125,6 +131,37 @@ func run(cmd *cobra.Command, args []string) {
 	}
 
 	log.Info().Int("count", len(allFiles)).Strs("patterns", args).Msg("Found .po files to process")
+
+	// Pre-scan files to count total untranslated entries and prompt for confirmation.
+	if !yes && !noTranslate && !dryRun {
+		totalUntranslated := 0
+		for _, file := range allFiles {
+			poFile, err := po.LoadFile(file)
+			if err != nil {
+				log.Warn().Err(err).Str("file", file).Msg("Could not read file for pre-scan, skipping")
+				continue
+			}
+			for _, msg := range poFile.Messages {
+				if msg.MsgId != "" && msg.MsgStr == "" {
+					totalUntranslated++
+				}
+			}
+		}
+
+		if totalUntranslated > 0 {
+			fmt.Printf("Found %d untranslated entries across %d file(s).\n", totalUntranslated, len(allFiles))
+			fmt.Print("Proceed with translation? (y/N): ")
+
+			reader := bufio.NewReader(os.Stdin)
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(strings.ToLower(input))
+
+			if input != "y" && input != "yes" {
+				fmt.Println("Translation cancelled.")
+				os.Exit(0)
+			}
+		}
+	}
 
 	if dryRun {
 		log.Info().Msg("DRY RUN ENABLED: No changes will be written to files.")
@@ -254,20 +291,17 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 	if len(untranslatedJobs) == 0 {
 		fileLog.Info().Msg("No untranslated entries found")
 
-		// If --restore-timestamp is set and changes were made (e.g. dedupe),
-		// we restore the timestamp from git to prevent spurious commits.
-		if restoreTimestamp && madeChanges {
-			previousTimestamp, err := git.GetRevisionDateFromGit(path)
-			if err != nil {
-				// This is not a fatal error; we just can't restore the timestamp.
+		// If --revert-if-unchanged is set and changes were made (e.g. dedupe),
+		// we revert the entire file to its state from git HEAD to prevent spurious commits.
+		if revertIfUnchanged && madeChanges {
+			if err := git.RevertFile(path); err != nil {
+				// This is not a fatal error; we just can't revert the file.
 				// This can happen if git is not installed or the file is not in a repo.
-				fileLog.Warn().Err(err).Msg("Could not restore git timestamp")
-			} else if previousTimestamp != "" {
-				currentTimestamp := poFile.MimeHeader.PORevisionDate
-				if currentTimestamp != previousTimestamp {
-					poFile.MimeHeader.PORevisionDate = previousTimestamp
-					fileLog.Info().Str("timestamp", previousTimestamp).Msg("Restored PO-Revision-Date from git")
-				}
+				fileLog.Warn().Err(err).Msg("Could not revert file to git HEAD, saving changes instead")
+			} else {
+				fileLog.Info().Msg("Reverted file to git HEAD version to avoid spurious commit")
+				// Since we reverted the file, we don't want to save the in-memory changes.
+				return 0, nil
 			}
 		}
 
