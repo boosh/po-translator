@@ -320,72 +320,7 @@ func TestFixUnescapedPercents(t *testing.T) {
 	}
 }
 
-func TestProcessFile_NoTranslate(t *testing.T) {
-	// Setup: Create a temporary directory and a sample .po file
-	tempDir, err := os.MkdirTemp("", "test-process-no-translate")
-	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
-
-	poContent := `
-msgid ""
-msgstr ""
-"Content-Type: text/plain; charset=UTF-8\n"
-
-msgid "An untranslated string"
-msgstr ""
-
-msgid "A 10% discount"
-msgstr "Un descuento del 10%"
-`
-	poPath := filepath.Join(tempDir, "test.po")
-	err = os.WriteFile(poPath, []byte(strings.TrimSpace(poContent)), 0644)
-	require.NoError(t, err)
-
-	// Set the global flags for this test case
-	noTranslate = true
-	fix = true
-	// Ensure flags are reset after the test
-	defer func() {
-		noTranslate = false
-		fix = false
-	}()
-
-	var mockAI translator.Provider = &mockProvider{}
-
-	// Run processFile
-	translations, err := processFile(context.Background(), mockAI, poPath, 10)
-	assert.NoError(t, err)
-
-	// Assert that no translations were attempted
-	assert.Equal(t, int64(0), translations, "Expected 0 translations to be reported")
-	assert.Equal(t, 0, mockAI.(*mockProvider).translationRequests, "Expected no calls to the AI provider")
-
-	// Verify the .po file content
-	modifiedPoFile, err := po.LoadFile(poPath)
-	require.NoError(t, err)
-
-	var untranslatedMsg *po.Message
-	var fixedMsg *po.Message
-
-	for i := range modifiedPoFile.Messages {
-		switch modifiedPoFile.Messages[i].MsgId {
-		case "An untranslated string":
-			untranslatedMsg = &modifiedPoFile.Messages[i]
-		case "A 10%% discount": // The msgid is now fixed
-			fixedMsg = &modifiedPoFile.Messages[i]
-		}
-	}
-
-	// Assert that the untranslated string is still untranslated
-	require.NotNil(t, untranslatedMsg, "Expected to find the untranslated message")
-	assert.Equal(t, "", untranslatedMsg.MsgStr, "msgstr should still be empty")
-
-	// Assert that the other string was fixed, meaning non-translation steps ran
-	require.NotNil(t, fixedMsg, "Expected to find the fixed message")
-	assert.Equal(t, "Un descuento del 10%%", fixedMsg.MsgStr)
-}
-
-func TestProcessFile_RevertIfUnchanged(t *testing.T) {
+func TestPreprocessFile_RevertIfUnchanged(t *testing.T) {
 	// Skip test if git is not installed
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found, skipping test")
@@ -447,7 +382,7 @@ msgstr "Hola"
 	err = os.WriteFile(poPath, []byte(strings.TrimSpace(modifiedPoContent)), 0644)
 	require.NoError(t, err)
 
-	// 3. Run processFile with --dedupe and --revert-if-unchanged
+	// 3. Run preprocessFile with --dedupe and --revert-if-unchanged
 	dedupe = true
 	revertIfUnchanged = true
 	defer func() {
@@ -456,9 +391,10 @@ msgstr "Hola"
 	}()
 
 	// No AI provider needed as no new translations are expected
-	translations, err := processFile(context.Background(), nil, poPath, 10)
+	needsTranslation, untranslatedCount, err := preprocessFile(poPath)
 	assert.NoError(t, err)
-	assert.Equal(t, int64(0), translations)
+	assert.False(t, needsTranslation)
+	assert.Equal(t, 0, untranslatedCount)
 
 	// 4. Verify the final state of the .po file
 	finalContent, err := os.ReadFile(poPath)
@@ -466,6 +402,68 @@ msgstr "Hola"
 
 	// Check that the file content was reverted to its original state
 	assert.Equal(t, string(originalContent), string(finalContent), "Expected file content to be reverted to git HEAD")
+}
+
+func TestPreprocessFile_RevertWithSpuriousChanges(t *testing.T) {
+	// Skip test if git is not installed
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found, skipping test")
+	}
+
+	tempDir, err := os.MkdirTemp("", "test-revert-spurious")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	runCmd := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tempDir
+		err := cmd.Run()
+		require.NoError(t, err)
+	}
+
+	runCmd("init")
+	runCmd("config", "user.name", "Test")
+	runCmd("config", "user.email", "test@example.com")
+
+	initialPoContent := `
+msgid "Hello"
+msgstr "Hola"
+`
+	poPath := filepath.Join(tempDir, "test.po")
+	err = os.WriteFile(poPath, []byte(strings.TrimSpace(initialPoContent)), 0644)
+	require.NoError(t, err)
+
+	runCmd("add", poPath)
+	runCmd("commit", "-m", "Initial")
+
+	originalContent, err := os.ReadFile(poPath)
+	require.NoError(t, err)
+
+	// Modify the file with only whitespace and timestamp, no new translations
+	modifiedPoContent := `
+msgid ""
+msgstr ""
+"PO-Revision-Date: 2025-01-01 10:00:00+00:00\n"
+
+msgid "Hello"
+msgstr "Hola"
+
+`
+	err = os.WriteFile(poPath, []byte(modifiedPoContent), 0644)
+	require.NoError(t, err)
+
+	// Run preprocessFile with --revert-if-unchanged
+	revertIfUnchanged = true
+	defer func() { revertIfUnchanged = false }()
+
+	needs, count, err := preprocessFile(poPath)
+	assert.NoError(t, err)
+	assert.False(t, needs)
+	assert.Equal(t, 0, count)
+
+	finalContent, err := os.ReadFile(poPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(originalContent), string(finalContent))
 }
 
 func TestRunWithConfirmation_YesFlag(t *testing.T) {
@@ -523,7 +521,7 @@ msgstr ""
 	assert.Equal(t, 1, mockAI.translatedMessages, "Expected translation to proceed when --yes is used")
 }
 
-func TestProcessFile_DryRun(t *testing.T) {
+func TestPreprocessFile_DryRun(t *testing.T) {
 	// Setup: Create a temporary directory and a sample .po file with a fixable issue
 	tempDir, err := os.MkdirTemp("", "test-dry-run")
 	require.NoError(t, err)
@@ -547,8 +545,8 @@ msgstr "Un descuento del 10%"`
 		fix = false
 	}()
 
-	// Run processFile
-	_, err = processFile(context.Background(), nil, poPath, 10)
+	// Run preprocessFile
+	_, _, err = preprocessFile(poPath)
 	assert.NoError(t, err)
 
 	// Verify the file content has not changed
@@ -557,7 +555,7 @@ msgstr "Un descuento del 10%"`
 	assert.Equal(t, string(originalContent), string(finalContent), "File content should not change in dry-run mode")
 }
 
-func TestProcessFile_MaxTranslations(t *testing.T) {
+func TestTranslateFile_MaxTranslations(t *testing.T) {
 	// Setup: Create a temporary directory and a .po file with multiple untranslated strings
 	tempDir, err := os.MkdirTemp("", "test-max-translations")
 	require.NoError(t, err)
@@ -586,8 +584,8 @@ msgstr ""
 	mockAI := &mockProvider{}
 	var provider translator.Provider = mockAI
 
-	// Run processFile
-	_, err = processFile(context.Background(), provider, poPath, 10)
+	// Run translateFile
+	_, err = translateFile(context.Background(), provider, poPath, 10)
 	assert.NoError(t, err)
 
 	// Assert that the AI provider was called with the correct number of messages
@@ -595,7 +593,7 @@ msgstr ""
 	assert.Equal(t, 1, mockAI.translationRequests, "Expected only one chunk request for the limited set of messages")
 }
 
-func TestProcessFile_SortsCorrectly(t *testing.T) {
+func TestPreprocessFile_SortsCorrectly(t *testing.T) {
 	// Setup: Create a temporary directory and a .po file with unsorted entries
 	tempDir, err := os.MkdirTemp("", "test-sorting")
 	require.NoError(t, err)
@@ -628,8 +626,8 @@ msgstr "Captcha"
 		noTranslate = false
 	}()
 
-	// Run processFile
-	_, err = processFile(context.Background(), nil, poPath, 10)
+	// Run preprocessFile
+	_, _, err = preprocessFile(poPath)
 	assert.NoError(t, err)
 
 	// Verify the file content is now sorted by msgid

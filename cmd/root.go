@@ -5,14 +5,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
-
-	"io/ioutil"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/chai2010/gettext-go/po"
@@ -28,21 +28,21 @@ import (
 var newProvider = translator.NewProvider
 
 var (
-	logLevel         string
-	logFile          string
-	provider         string
-	model            string
-	apiKey           string
-	temperature      float32
-	maxRetries       int
-	retryDelay       time.Duration
-	chunkSize        int
-	dryRun           bool
-	strict           bool
-	dedupe           bool
-	fix              bool
-	maxTranslations  int
-	noTranslate      bool
+	logLevel          string
+	logFile           string
+	provider          string
+	model             string
+	apiKey            string
+	temperature       float32
+	maxRetries        int
+	retryDelay        time.Duration
+	chunkSize         int
+	dryRun            bool
+	strict            bool
+	dedupe            bool
+	fix               bool
+	maxTranslations   int
+	noTranslate       bool
 	revertIfUnchanged bool
 	yes               bool
 )
@@ -87,195 +87,213 @@ func Execute() {
 func run(cmd *cobra.Command, args []string) {
 	logger.Setup(logLevel, logFile)
 	ctx := context.Background()
-
-	var aiProvider translator.Provider
-	var err error
-
-	if !noTranslate {
-		if provider == "" {
-			log.Fatal().Msg("Error: --provider is required unless --no-translate is set")
-		}
-		if model == "" {
-			log.Fatal().Msg("Error: --model is required unless --no-translate is set")
-		}
-
-		providerConfig := translator.Config{
-			Provider:    provider,
-			Model:       model,
-			APIKey:      apiKey,
-			Temperature: temperature,
-			MaxRetries:  maxRetries,
-		}
-		aiProvider, err = newProvider(ctx, providerConfig)
-		if err != nil {
-			log.Fatal().Err(err).Msg("Failed to create AI provider")
-		}
-		log.Info().Str("provider", provider).Str("model", model).Msg("Initialized AI provider")
-	} else {
-		log.Info().Msg("Translation is disabled.")
-	}
-
 	start := time.Now()
-	var allFiles []string
-	for _, pattern := range args {
-		matches, err := doublestar.Glob(os.DirFS("."), pattern)
-		if err != nil {
-			log.Warn().Err(err).Str("pattern", pattern).Msg("Invalid glob pattern")
-			continue
-		}
-		allFiles = append(allFiles, matches...)
-	}
-
-	if len(allFiles) == 0 {
-		log.Fatal().Msg("No .po files found matching patterns")
-	}
-
-	log.Info().Int("count", len(allFiles)).Strs("patterns", args).Msg("Found .po files to process")
-
-	// Pre-scan files to count total untranslated entries and prompt for confirmation.
-	if !yes && !noTranslate && !dryRun {
-		totalUntranslated := 0
-		for _, file := range allFiles {
-			poFile, err := po.LoadFile(file)
-			if err != nil {
-				log.Warn().Err(err).Str("file", file).Msg("Could not read file for pre-scan, skipping")
-				continue
-			}
-			for _, msg := range poFile.Messages {
-				if msg.MsgId != "" && msg.MsgStr == "" {
-					totalUntranslated++
-				}
-			}
-		}
-
-		if totalUntranslated > 0 {
-			fmt.Printf("Found %d untranslated entries across %d file(s).\n", totalUntranslated, len(allFiles))
-			fmt.Print("Proceed with translation? (y/N): ")
-
-			reader := bufio.NewReader(os.Stdin)
-			input, _ := reader.ReadString('\n')
-			input = strings.TrimSpace(strings.ToLower(input))
-
-			if input != "y" && input != "yes" {
-				fmt.Println("Translation cancelled.")
-				os.Exit(0)
-			}
-		}
-	}
 
 	if dryRun {
 		log.Info().Msg("DRY RUN ENABLED: No changes will be written to files.")
 	}
 
-	var wg sync.WaitGroup
-	var totalErrors int64
-	var totalTranslations int64
+	allFiles, err := findFiles(args)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to find files")
+	}
 
+	// --- Pass 1: Pre-process and clean up files ---
+	log.Info().Msg("--- Starting pre-processing pass (dedupe, fix, sort) ---")
+	var filesToTranslate []string
+	var totalErrors int64
+	untranslatedFileCounts := make(map[string]int)
+
+	for _, path := range allFiles {
+		needsTranslation, untranslatedCount, err := preprocessFile(path)
+		if err != nil {
+			log.Error().Err(err).Str("file", path).Msg("Failed during pre-processing")
+			atomic.AddInt64(&totalErrors, 1)
+			if strict {
+				log.Fatal().Msg("Strict mode enabled, exiting on first error.")
+			}
+			continue
+		}
+		if needsTranslation {
+			filesToTranslate = append(filesToTranslate, path)
+			untranslatedFileCounts[path] = untranslatedCount
+		}
+	}
+
+	if totalErrors > 0 {
+		logSummary(len(allFiles), 0, totalErrors, start)
+		return
+	}
+
+	// --- Confirmation Step ---
+	if noTranslate || len(filesToTranslate) == 0 {
+		log.Info().Msg("Pre-processing complete. No new translations needed.")
+		logSummary(len(allFiles), 0, totalErrors, start)
+		return
+	}
+
+	totalUntranslated := 0
+	for _, count := range untranslatedFileCounts {
+		totalUntranslated += count
+	}
+
+	if !yes && !dryRun {
+		fmt.Println("The following files have untranslated entries:")
+		for _, path := range filesToTranslate {
+			fmt.Printf("  - %s: %d entries\n", path, untranslatedFileCounts[path])
+		}
+		fmt.Printf("\nTotal: %d untranslated entries across %d file(s).\n", totalUntranslated, len(filesToTranslate))
+		fmt.Print("Proceed with translation? (y/N): ")
+
+		reader := bufio.NewReader(os.Stdin)
+		input, _ := reader.ReadString('\n')
+		if !strings.EqualFold(strings.TrimSpace(input), "y") && !strings.EqualFold(strings.TrimSpace(input), "yes") {
+			fmt.Println("Translation cancelled.")
+			logSummary(len(allFiles), 0, totalErrors, start)
+			return
+		}
+	}
+
+	// --- Pass 2: Translate files that need it ---
+	log.Info().Msg("--- Starting translation pass ---")
+	aiProvider, err := initProvider(ctx)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to initialize AI provider")
+	}
+
+	var wg sync.WaitGroup
+	var totalTranslations int64
 	semaphore := make(chan struct{}, 4)
 
-	for _, file := range allFiles {
+	for _, path := range filesToTranslate {
 		wg.Add(1)
-		go func(path string) {
+		go func(p string) {
 			defer wg.Done()
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			translations, err := processFile(ctx, aiProvider, path, chunkSize)
+			translations, err := translateFile(ctx, aiProvider, p, chunkSize)
 			if err != nil {
-				log.Error().Err(err).Str("file", path).Msg("Failed to process file")
-				totalErrors++
-				if strict {
-					log.Fatal().Msg("Strict mode enabled, exiting on first error.")
-				}
+				log.Error().Err(err).Str("file", p).Msg("Failed to translate file")
+				atomic.AddInt64(&totalErrors, 1)
 			} else {
-				if translations > 0 {
-					log.Info().Int64("translations", translations).Str("file", path).Msg("Completed file processing")
-				} else {
-					log.Info().Str("file", path).Msg("Completed file processing (no new translations)")
-				}
-				totalTranslations += translations
+				atomic.AddInt64(&totalTranslations, translations)
 			}
-		}(file)
+		}(path)
 	}
-
 	wg.Wait()
 
-	elapsed := time.Since(start).Seconds()
-	summary := log.Info().
-		Int("total_files", len(allFiles)).
-		Int64("total_translations", totalTranslations).
-		Int64("total_errors", totalErrors).
-		Float64("elapsed_seconds", elapsed)
-
-	if totalErrors > 0 {
-		summary.Msg("Processing completed with errors")
-		os.Exit(1)
-	} else {
-		summary.Msg("All files processed successfully")
-	}
+	logSummary(len(allFiles), totalTranslations, totalErrors, start)
 }
 
-func processFile(ctx context.Context, provider translator.Provider, path string, chunkSize int) (int64, error) {
+func findFiles(patterns []string) ([]string, error) {
+	var allFiles []string
+	for _, pattern := range patterns {
+		matches, err := doublestar.Glob(os.DirFS("."), pattern)
+		if err != nil {
+			return nil, fmt.Errorf("invalid glob pattern: %s", pattern)
+		}
+		allFiles = append(allFiles, matches...)
+	}
+	if len(allFiles) == 0 {
+		return nil, fmt.Errorf("no .po files found matching patterns")
+	}
+	return allFiles, nil
+}
+
+func initProvider(ctx context.Context) (translator.Provider, error) {
+	if provider == "" {
+		return nil, fmt.Errorf("error: --provider is required unless --no-translate is set")
+	}
+	if model == "" {
+		return nil, fmt.Errorf("error: --model is required unless --no-translate is set")
+	}
+
+	providerConfig := translator.Config{
+		Provider:    provider,
+		Model:       model,
+		APIKey:      apiKey,
+		Temperature: temperature,
+		MaxRetries:  maxRetries,
+	}
+	p, err := newProvider(ctx, providerConfig)
+	if err != nil {
+		return nil, err
+	}
+	log.Info().Str("provider", provider).Str("model", model).Msg("Initialized AI provider")
+	return p, nil
+}
+
+func preprocessFile(path string) (needsTranslation bool, untranslatedCount int, err error) {
 	fileLog := log.With().Str("file", path).Logger()
-	fileLog.Info().Msg("Processing started")
-	start := time.Now()
+	fileLog.Info().Msg("Pre-processing file")
 
 	poFile, err := po.LoadFile(path)
 	if err != nil {
-		return 0, fmt.Errorf("failed to load po file: %w", err)
+		return false, 0, fmt.Errorf("failed to load po file: %w", err)
 	}
 
 	var madeChanges bool
-
 	if dedupe {
-		dedupedCount, dedupedChanges, err := deduplicateEntries(poFile)
+		count, changed, err := deduplicateEntries(poFile)
 		if err != nil {
-			return 0, fmt.Errorf("failed to deduplicate entries: %w", err)
+			return false, 0, err
 		}
-		if dedupedChanges {
-			fileLog.Info().Int("count", dedupedCount).Msg("Deduplicated entries")
+		if changed {
+			fileLog.Info().Int("count", count).Msg("Deduplicated entries")
 			madeChanges = true
 		}
 	}
-
 	if fix {
-		fixCount, fixChanges := fixUnescapedPercents(poFile)
-		if fixChanges {
-			fileLog.Info().Int("count", fixCount).Msg("Fixed unescaped percent signs")
-			madeChanges = madeChanges || fixChanges
+		count, changed := fixUnescapedPercents(poFile)
+		if changed {
+			fileLog.Info().Int("count", count).Msg("Fixed unescaped percent signs")
+			madeChanges = true
 		}
 	}
-
-	fuzzyCount, fuzzyChanges := clearFuzzyEntries(poFile)
-	if fuzzyChanges {
-		fileLog.Info().Int("count", fuzzyCount).Msg("Cleared fuzzy entries")
-		madeChanges = madeChanges || fuzzyChanges
+	if count, changed := clearFuzzyEntries(poFile); changed {
+		fileLog.Info().Int("count", count).Msg("Cleared fuzzy entries")
+		madeChanges = true
 	}
-
-	// Sort messages by msgid to ensure stable order
-	if sortChanges := sortMessages(poFile); sortChanges {
+	if changed := sortMessages(poFile); changed {
 		fileLog.Info().Msg("Reordered messages by msgid")
 		madeChanges = true
 	}
 
-	// If no-translate flag is set, save any changes from previous steps and exit.
-	if noTranslate {
-		if !dryRun && madeChanges {
-			fileLog.Info().Msg("Saving changes from non-translation operations")
-			if err := savePoFile(poFile, path); err != nil {
-				return 0, fmt.Errorf("failed to save file: %w", err)
-			}
-		} else if madeChanges {
-			fileLog.Info().Msg("DRY RUN: Changes from non-translation operations would have been saved.")
+	for _, msg := range poFile.Messages {
+		if msg.MsgId != "" && msg.MsgStr == "" {
+			untranslatedCount++
 		}
-		return 0, nil
 	}
 
-	// Step 2: Find untranslated entries
-	type job struct {
-		Index int
-		Msg   po.Message
+	if untranslatedCount == 0 && revertIfUnchanged {
+		err := git.RevertFile(path)
+		if err == nil {
+			fileLog.Info().Msg("Reverted file to git HEAD version to avoid spurious commit")
+			return false, 0, nil
+		}
+		fileLog.Warn().Err(err).Msg("Could not revert file to git HEAD, saving cleaned-up version instead")
 	}
+
+	if madeChanges && !dryRun {
+		if err := savePoFile(poFile, path); err != nil {
+			return false, 0, fmt.Errorf("failed to save file after pre-processing: %w", err)
+		}
+	}
+
+	return untranslatedCount > 0, untranslatedCount, nil
+}
+
+func translateFile(ctx context.Context, provider translator.Provider, path string, chunkSize int) (int64, error) {
+	fileLog := log.With().Str("file", path).Logger()
+	fileLog.Info().Msg("Translating file")
+
+	poFile, err := po.LoadFile(path)
+	if err != nil {
+		return 0, fmt.Errorf("failed to load po file for translation: %w", err)
+	}
+
+	type job struct{ Index int; Msg po.Message }
 	var untranslatedJobs []job
 	for i, msg := range poFile.Messages {
 		if msg.MsgId != "" && msg.MsgStr == "" {
@@ -283,53 +301,21 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 		}
 	}
 
+	if len(untranslatedJobs) == 0 {
+		return 0, nil
+	}
+
 	if maxTranslations > 0 && len(untranslatedJobs) > maxTranslations {
 		fileLog.Info().Int("limit", maxTranslations).Int("original_count", len(untranslatedJobs)).Msg("Limiting translations to max-translations")
 		untranslatedJobs = untranslatedJobs[:maxTranslations]
 	}
 
-	if len(untranslatedJobs) == 0 {
-		fileLog.Info().Msg("No untranslated entries found")
-
-		// If --revert-if-unchanged is set and changes were made (e.g. dedupe),
-		// we revert the entire file to its state from git HEAD to prevent spurious commits.
-		if revertIfUnchanged && madeChanges {
-			if err := git.RevertFile(path); err != nil {
-				// This is not a fatal error; we just can't revert the file.
-				// This can happen if git is not installed or the file is not in a repo.
-				fileLog.Warn().Err(err).Msg("Could not revert file to git HEAD, saving changes instead")
-			} else {
-				fileLog.Info().Msg("Reverted file to git HEAD version to avoid spurious commit")
-				// Since we reverted the file, we don't want to save the in-memory changes.
-				return 0, nil
-			}
-		}
-
-		if !dryRun && madeChanges {
-			if err := savePoFile(poFile, path); err != nil {
-				return 0, fmt.Errorf("failed to save file after other operations: %w", err)
-			}
-		}
-		return 0, nil
-	}
-
-	fileLog.Info().Int("count", len(untranslatedJobs)).Msg("Found untranslated entries")
-
 	if dryRun {
-		if madeChanges {
-			fileLog.Info().Msg("DRY RUN: Fuzzy entries would be cleared.")
-		}
-		if len(untranslatedJobs) > 0 {
-			fileLog.Info().Msg("DRY RUN: The following entries would be translated:")
-			for _, job := range untranslatedJobs {
-				fileLog.Info().Str("msgid", job.Msg.MsgId).Msg("  - Would translate")
-			}
-		}
+		fileLog.Info().Int("count", len(untranslatedJobs)).Msg("DRY RUN: Would translate entries")
 		return int64(len(untranslatedJobs)), nil
 	}
 
-	// Step 3: Translate in chunks and save progressively
-	var totalTranslated int64 = 0
+	var totalTranslated int64
 	for i := 0; i < len(untranslatedJobs); i += chunkSize {
 		end := i + chunkSize
 		if end > len(untranslatedJobs) {
@@ -342,24 +328,9 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 			msgChunk[i] = j.Msg
 		}
 
-		chunkLog := fileLog.With().
-			Int("chunk_start", i+1).
-			Int("chunk_end", end).
-			Int("total", len(untranslatedJobs)).
-			Logger()
-		chunkLog.Info().Str("provider", provider.String()).Str("model", model).Msg("Translating chunk")
-
-		chunkStart := time.Now()
 		translations, err := translator.TranslateChunk(ctx, provider, msgChunk, path)
 		if err != nil {
-			// Return the count of translations completed so far, even if this chunk failed
 			return totalTranslated, fmt.Errorf("translation error in chunk %d-%d: %w", i+1, end, err)
-		}
-		chunkLog.Debug().Float64("duration_seconds", time.Since(chunkStart).Seconds()).Msg("Chunk translation took")
-
-		if len(translations) == 0 {
-			chunkLog.Info().Msg("Chunk processed, but no translations were returned.")
-			continue
 		}
 
 		for j, translation := range translations {
@@ -367,31 +338,33 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 			poFile.Messages[originalIndex].MsgStr = translation
 		}
 		totalTranslated += int64(len(translations))
-		madeChanges = true
 
-		// Save progress after each chunk
-		if !dryRun {
-			chunkLog.Debug().Msg("Saving progress to file")
-			if err := savePoFile(poFile, path); err != nil {
-				// Return the count of translations successfully processed so far, along with the save error
-				return totalTranslated, fmt.Errorf("failed to save progress after chunk %d-%d: %w", i+1, end, err)
-			}
+		if err := savePoFile(poFile, path); err != nil {
+			return totalTranslated, fmt.Errorf("failed to save progress after chunk %d-%d: %w", i+1, end, err)
 		}
 	}
-
-	fileLog.Info().Float64("duration_seconds", time.Since(start).Seconds()).Msg("Completed processing file")
 	return totalTranslated, nil
 }
 
-// clearFuzzyEntries iterates through a .po file and clears the fuzzy flag
-// and any obsolete comments from messages that are marked as fuzzy.
-// It returns the number of fuzzy entries that were cleared and a boolean
-// indicating whether any changes were made.
+func logSummary(fileCount int, translationCount, errorCount int64, start time.Time) {
+	elapsed := time.Since(start).Seconds()
+	summary := log.Info().
+		Int("total_files", fileCount).
+		Int64("total_translations", translationCount).
+		Int64("total_errors", errorCount).
+		Float64("elapsed_seconds", elapsed)
+
+	if errorCount > 0 {
+		summary.Msg("Processing completed with errors")
+		os.Exit(1)
+	} else {
+		summary.Msg("All files processed successfully")
+	}
+}
+
 func clearFuzzyEntries(poFile *po.File) (fuzzyCount int, madeChanges bool) {
 	for i := range poFile.Messages {
 		if poFile.Messages[i].Comment.GetFuzzy() {
-			// When a fuzzy entry is re-translated, we clear the fuzzy flag,
-			// the previous translation, and the obsolete msgid comments.
 			var newFlags []string
 			for _, flag := range poFile.Messages[i].Comment.Flags {
 				if flag != "fuzzy" {
@@ -409,47 +382,27 @@ func clearFuzzyEntries(poFile *po.File) (fuzzyCount int, madeChanges bool) {
 	return fuzzyCount, madeChanges
 }
 
-// deduplicateEntries removes duplicate messages from a .po file.
-// It identifies duplicates based on a composite key of msgctxt and msgid.
-// When duplicates are found with the same msgstr, it keeps one entry
-// (preferring a non-fuzzy one) and removes the others.
-// It will return an error if two entries have the same msgctxt and msgid but
-// different msgstr values.
 func deduplicateEntries(poFile *po.File) (dedupedCount int, madeChanges bool, err error) {
-	// key: "msgctxt|msgid" -> list of indices
 	msgidMap := make(map[string][]int)
 	for i, msg := range poFile.Messages {
 		if msg.MsgId == "" {
-			continue // Skip header
+			continue
 		}
 		key := fmt.Sprintf("%s|%s", msg.MsgContext, msg.MsgId)
 		msgidMap[key] = append(msgidMap[key], i)
 	}
 
 	indicesToRemove := make(map[int]struct{})
-
 	for _, indices := range msgidMap {
 		if len(indices) <= 1 {
 			continue
 		}
-
-		// Check for different msgstr values within the group
 		firstMsgStr := poFile.Messages[indices[0]].MsgStr
 		for i := 1; i < len(indices); i++ {
-			currentIndex := indices[i]
-			if poFile.Messages[currentIndex].MsgStr != firstMsgStr {
-				return 0, false, fmt.Errorf(
-					"duplicate msgid '%s' (context: '%s') with different msgstr: '%s' vs '%s'",
-					poFile.Messages[indices[0]].MsgId,
-					poFile.Messages[indices[0]].MsgContext,
-					firstMsgStr,
-					poFile.Messages[currentIndex].MsgStr,
-				)
+			if poFile.Messages[indices[i]].MsgStr != firstMsgStr {
+				return 0, false, fmt.Errorf("duplicate msgid '%s' (context: '%s') with different msgstr", poFile.Messages[indices[0]].MsgId, poFile.Messages[indices[0]].MsgContext)
 			}
 		}
-
-		// All msgstr are the same; decide which entry to keep.
-		// We prefer to keep a non-fuzzy entry.
 		keepIndex := -1
 		for _, index := range indices {
 			if !poFile.Messages[index].Comment.GetFuzzy() {
@@ -457,13 +410,9 @@ func deduplicateEntries(poFile *po.File) (dedupedCount int, madeChanges bool, er
 				break
 			}
 		}
-
-		// If all entries are fuzzy, keep the first one. Its fuzzy state is preserved.
 		if keepIndex == -1 {
 			keepIndex = indices[0]
 		}
-
-		// Mark all other entries in the group for removal.
 		for _, index := range indices {
 			if index != keepIndex {
 				indicesToRemove[index] = struct{}{}
@@ -471,15 +420,7 @@ func deduplicateEntries(poFile *po.File) (dedupedCount int, madeChanges bool, er
 		}
 	}
 
-	dedupedCount = len(indicesToRemove)
-	madeChanges = dedupedCount > 0
-
-	if !madeChanges {
-		return 0, false, nil
-	}
-
-	// Now, remove the marked entries by building a new slice.
-	if dedupedCount > 0 {
+	if len(indicesToRemove) > 0 {
 		var newMessages []po.Message
 		for i, msg := range poFile.Messages {
 			if _, shouldRemove := indicesToRemove[i]; !shouldRemove {
@@ -487,20 +428,13 @@ func deduplicateEntries(poFile *po.File) (dedupedCount int, madeChanges bool, er
 			}
 		}
 		poFile.Messages = newMessages
+		return len(indicesToRemove), true, nil
 	}
-
-	return dedupedCount, madeChanges, nil
+	return 0, false, nil
 }
 
-// fixUnescapedPercents escapes standalone '%' characters in msgid and msgstr
-// fields of a .po file. It is designed to fix issues where strings like "10%"
-// are not correctly escaped as "10%%". It avoids escaping valid Python/C-style
-// format specifiers like `%(name)s` or `%d`.
 func fixUnescapedPercents(poFile *po.File) (fixCount int, madeChanges bool) {
-	// Regex to match all known valid format specifiers, or a lone percent sign.
-	// The order is important: match longer specific patterns first.
 	re := regexp.MustCompile(`%%|%\([^\)]*\)[sdifouxXeEgGcp]|%[sdifouxXeEgGcp]|%`)
-
 	fixer := func(s string) (string, bool) {
 		stringChanged := false
 		replacer := func(match string) string {
@@ -508,19 +442,14 @@ func fixUnescapedPercents(poFile *po.File) (fixCount int, madeChanges bool) {
 				stringChanged = true
 				return "%%"
 			}
-			// It was a valid specifier or an already-escaped percent, so return it unchanged.
 			return match
 		}
 		result := re.ReplaceAllStringFunc(s, replacer)
 		return result, stringChanged
 	}
-
-	totalChanges := false
 	count := 0
-
 	for i := range poFile.Messages {
 		msgChanged := false
-
 		if poFile.Messages[i].MsgId != "" {
 			fixedMsgId, idChanged := fixer(poFile.Messages[i].MsgId)
 			if idChanged {
@@ -528,7 +457,6 @@ func fixUnescapedPercents(poFile *po.File) (fixCount int, madeChanges bool) {
 				msgChanged = true
 			}
 		}
-
 		if poFile.Messages[i].MsgStr != "" {
 			fixedMsgStr, strChanged := fixer(poFile.Messages[i].MsgStr)
 			if strChanged {
@@ -536,59 +464,40 @@ func fixUnescapedPercents(poFile *po.File) (fixCount int, madeChanges bool) {
 				msgChanged = true
 			}
 		}
-
 		if msgChanged {
-			totalChanges = true
+			madeChanges = true
 			count++
 		}
 	}
-	return count, totalChanges
+	return count, madeChanges
 }
 
-// sortMessages sorts the messages in a .po file by msgid.
-// It preserves the header entry at the beginning of the file.
-// It returns a boolean indicating whether the order of messages was changed.
 func sortMessages(poFile *po.File) bool {
 	if len(poFile.Messages) <= 1 {
 		return false
 	}
-
-	// Capture the original order of msgids to detect changes.
 	originalOrder := make([][]byte, 0, len(poFile.Messages))
 	for _, msg := range poFile.Messages {
 		originalOrder = append(originalOrder, []byte(msg.MsgId))
 	}
-
-	// Sort the entire slice. The header is not in this slice.
 	sort.SliceStable(poFile.Messages, func(i, j int) bool {
 		return poFile.Messages[i].MsgId < poFile.Messages[j].MsgId
 	})
-
-	// Check if the order has actually changed
 	for i, msg := range poFile.Messages {
 		if !bytes.Equal(originalOrder[i], []byte(msg.MsgId)) {
-			return true // Order has changed
+			return true
 		}
 	}
-
-	return false // Order is the same
+	return false
 }
 
-// savePoFile saves the po.File to the given path, ensuring the msgid-sorted
-// order of messages is preserved. This bypasses the default library save method
-// which re-sorts by file reference.
 func savePoFile(poFile *po.File, path string) error {
 	var buf bytes.Buffer
-
-	// Write the header first.
 	buf.WriteString(poFile.MimeHeader.String())
 	buf.WriteString("\n")
-
-	// Then, write the messages in their current (sorted) order.
 	for _, msg := range poFile.Messages {
 		buf.WriteString(msg.String())
 		buf.WriteString("\n")
 	}
-
 	return ioutil.WriteFile(path, buf.Bytes(), 0644)
 }
