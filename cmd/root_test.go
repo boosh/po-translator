@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -369,4 +371,90 @@ msgstr "Un descuento del 10%"
 	// Assert that the other string was fixed, meaning non-translation steps ran
 	require.NotNil(t, fixedMsg, "Expected to find the fixed message")
 	assert.Equal(t, "Un descuento del 10%%", fixedMsg.MsgStr)
+}
+
+func TestProcessFile_RestoreTimestamp(t *testing.T) {
+	// Skip test if git is not installed
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found, skipping test")
+	}
+
+	// Setup: Create a temporary git repository
+	tempDir, err := os.MkdirTemp("", "test-restore-timestamp")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	runCmd := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tempDir
+		err := cmd.Run()
+		require.NoError(t, err, "failed to run git command: git %s", strings.Join(args, " "))
+	}
+
+	runCmd("init")
+	runCmd("config", "user.name", "Test User")
+	runCmd("config", "user.email", "test@example.com")
+
+	// 1. Create and commit the initial .po file
+	originalTimestamp := "2023-10-27 10:00:00+00:00"
+	initialPoContent := fmt.Sprintf(`
+msgid ""
+msgstr ""
+"PO-Revision-Date: %s\\n"
+"Language: en\\n"
+
+msgid "Hello"
+msgstr "Hola"
+`, originalTimestamp)
+
+	poPath := filepath.Join(tempDir, "test.po")
+	err = os.WriteFile(poPath, []byte(strings.TrimSpace(initialPoContent)), 0644)
+	require.NoError(t, err)
+
+	runCmd("add", "test.po")
+	runCmd("commit", "-m", "Initial commit")
+
+	// 2. Modify the file to simulate Django's makemessages
+	// (new timestamp, added duplicate entry)
+	newTimestamp := "2023-10-28 12:00:00+00:00"
+	modifiedPoContent := fmt.Sprintf(`
+msgid ""
+msgstr ""
+"PO-Revision-Date: %s\\n"
+"Language: en\\n"
+
+msgid "Hello"
+msgstr "Hola"
+
+# This is a duplicate that should be removed
+msgid "Hello"
+msgstr "Hola"
+`, newTimestamp)
+
+	err = os.WriteFile(poPath, []byte(strings.TrimSpace(modifiedPoContent)), 0644)
+	require.NoError(t, err)
+
+	// 3. Run processFile with --dedupe and --restore-timestamp
+	dedupe = true
+	restoreTimestamp = true
+	defer func() {
+		dedupe = false
+		restoreTimestamp = false
+	}()
+
+	// No AI provider needed as no new translations are expected
+	translations, err := processFile(context.Background(), nil, poPath, 10)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), translations)
+
+	// 4. Verify the final state of the .po file
+	finalPoFile, err := po.LoadFile(poPath)
+	require.NoError(t, err)
+
+	// Check that the duplicate was removed
+	assert.Len(t, finalPoFile.Messages, 1, "Expected duplicate message to be removed")
+
+	// Check that the timestamp was restored
+	finalTimestamp := finalPoFile.MimeHeader.PORevisionDate
+	assert.Equal(t, originalTimestamp, finalTimestamp, "Expected timestamp to be restored from git")
 }

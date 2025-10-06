@@ -16,26 +16,28 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
+	"po-translator/internal/git"
 	"po-translator/internal/logger"
 	"po-translator/internal/translator"
 )
 
 var (
-	logLevel    string
-	logFile     string
-	provider    string
-	model       string
-	apiKey      string
-	temperature float32
-	maxRetries  int
-	retryDelay  time.Duration
-	chunkSize       int
-	dryRun          bool
-	strict          bool
-	dedupe          bool
-	fix             bool
-	maxTranslations int
-	noTranslate     bool
+	logLevel         string
+	logFile          string
+	provider         string
+	model            string
+	apiKey           string
+	temperature      float32
+	maxRetries       int
+	retryDelay       time.Duration
+	chunkSize        int
+	dryRun           bool
+	strict           bool
+	dedupe           bool
+	fix              bool
+	maxTranslations  int
+	noTranslate      bool
+	restoreTimestamp bool
 )
 
 var rootCmd = &cobra.Command{
@@ -65,7 +67,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&fix, "fix", false, "Fix unescaped percent signs in msgid and msgstr")
 	rootCmd.Flags().IntVar(&maxTranslations, "max-translations", 0, "Max number of entries to translate per file (0 for no limit)")
 	rootCmd.Flags().BoolVar(&noTranslate, "no-translate", false, "Disable translation and only perform other operations (e.g., --fix, --dedupe)")
-
+	rootCmd.Flags().BoolVar(&restoreTimestamp, "restore-timestamp", false, "Restore PO-Revision-Date from git if no translations were made")
 }
 
 func Execute() {
@@ -249,6 +251,24 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 
 	if len(untranslatedJobs) == 0 {
 		fileLog.Info().Msg("No untranslated entries found")
+
+		// If --restore-timestamp is set and changes were made (e.g. dedupe),
+		// we restore the timestamp from git to prevent spurious commits.
+		if restoreTimestamp && madeChanges {
+			previousTimestamp, err := git.GetRevisionDateFromGit(path)
+			if err != nil {
+				// This is not a fatal error; we just can't restore the timestamp.
+				// This can happen if git is not installed or the file is not in a repo.
+				fileLog.Warn().Err(err).Msg("Could not restore git timestamp")
+			} else if previousTimestamp != "" {
+				currentTimestamp := poFile.MimeHeader.PORevisionDate
+				if currentTimestamp != previousTimestamp {
+					poFile.MimeHeader.PORevisionDate = previousTimestamp
+					fileLog.Info().Str("timestamp", previousTimestamp).Msg("Restored PO-Revision-Date from git")
+				}
+			}
+		}
+
 		if !dryRun && madeChanges {
 			if err := poFile.Save(path); err != nil {
 				return 0, fmt.Errorf("failed to save file after other operations: %w", err)
@@ -491,8 +511,6 @@ func fixUnescapedPercents(poFile *po.File) (fixCount int, madeChanges bool) {
 
 // sortMessages sorts the messages in a .po file by msgid.
 // It preserves the header entry at the beginning of the file.
-// sortMessages sorts the messages in a .po file by msgid.
-// It preserves the header entry at the beginning of the file.
 // It returns a boolean indicating whether the order of messages was changed.
 func sortMessages(poFile *po.File) bool {
 	if len(poFile.Messages) <= 1 {
@@ -505,16 +523,10 @@ func sortMessages(poFile *po.File) bool {
 		originalOrder = append(originalOrder, []byte(msg.MsgId))
 	}
 
-	// Separate the header (first message, usually with empty msgid)
-	header := poFile.Messages[0]
-	messages := poFile.Messages[1:]
-
-	sort.SliceStable(messages, func(i, j int) bool {
-		return messages[i].MsgId < messages[j].MsgId
+	// Sort the entire slice. The header is not in this slice.
+	sort.SliceStable(poFile.Messages, func(i, j int) bool {
+		return poFile.Messages[i].MsgId < poFile.Messages[j].MsgId
 	})
-
-	// Re-assemble the messages with the header at the top
-	poFile.Messages = append([]po.Message{header}, messages...)
 
 	// Check if the order has actually changed
 	for i, msg := range poFile.Messages {
