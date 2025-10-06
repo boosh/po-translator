@@ -419,10 +419,9 @@ msgstr "Hola"
 	}()
 
 	// No AI provider needed as no new translations are expected
-	needsTranslation, untranslatedCount, err := preprocessFile(poPath)
+	untranslated, err := preprocessFile(poPath)
 	assert.NoError(t, err)
-	assert.False(t, needsTranslation)
-	assert.Equal(t, 0, untranslatedCount)
+	assert.Empty(t, untranslated, "Expected no untranslated entries after revert")
 
 	// 4. Verify the final state of the .po file
 	finalContent, err := os.ReadFile(poPath)
@@ -484,10 +483,9 @@ msgstr "Hola"
 	revertIfUnchanged = true
 	defer func() { revertIfUnchanged = false }()
 
-	needs, count, err := preprocessFile(poPath)
+	untranslated, err := preprocessFile(poPath)
 	assert.NoError(t, err)
-	assert.False(t, needs)
-	assert.Equal(t, 0, count)
+	assert.Empty(t, untranslated)
 
 	finalContent, err := os.ReadFile(poPath)
 	require.NoError(t, err)
@@ -574,7 +572,7 @@ msgstr "Un descuento del 10%"`
 	}()
 
 	// Run preprocessFile
-	_, _, err = preprocessFile(poPath)
+	_, err = preprocessFile(poPath)
 	assert.NoError(t, err)
 
 	// Verify the file content has not changed
@@ -655,7 +653,7 @@ msgstr "Captcha"
 	}()
 
 	// Run preprocessFile
-	_, _, err = preprocessFile(poPath)
+	_, err = preprocessFile(poPath)
 	assert.NoError(t, err)
 
 	// Verify the file content is now sorted by msgid
