@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -529,4 +531,64 @@ msgstr ""
 	// Assert that the AI provider was called with the correct number of messages
 	assert.Equal(t, 2, mockAI.translatedMessages, "Expected to translate only the max number of messages")
 	assert.Equal(t, 1, mockAI.translationRequests, "Expected only one chunk request for the limited set of messages")
+}
+
+func TestProcessFile_SortsCorrectly(t *testing.T) {
+	// Setup: Create a temporary directory and a .po file with unsorted entries
+	tempDir, err := os.MkdirTemp("", "test-sorting")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	unsortedPoContent := `
+#: forms.py:29 forms.py:58
+msgid "Message"
+msgstr "Mensaje"
+
+#: forms.py:27 forms.py:55 models.py:42
+msgid "Message Type"
+msgstr "Tipo de mensaje"
+
+#: forms.py:28 forms.py:56 models.py:33
+msgid "Subject"
+msgstr "Asunto"
+
+#: forms.py:48
+msgid "Captcha"
+msgstr "Captcha"
+`
+	poPath := filepath.Join(tempDir, "test.po")
+	err = os.WriteFile(poPath, []byte(strings.TrimSpace(unsortedPoContent)), 0644)
+	require.NoError(t, err)
+
+	// Set flags to only perform sorting and saving
+	noTranslate = true
+	defer func() {
+		noTranslate = false
+	}()
+
+	// Run processFile
+	_, err = processFile(context.Background(), nil, poPath, 10)
+	assert.NoError(t, err)
+
+	// Verify the file content is now sorted by msgid
+	finalContent, err := os.ReadFile(poPath)
+	require.NoError(t, err)
+
+	// The expected order is Captcha, Message, Message Type, Subject
+	expectedOrder := []string{"Captcha", "Message", "Message Type", "Subject"}
+
+	scanner := bufio.NewScanner(bytes.NewReader(finalContent))
+	var foundMsgids []string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "msgid ") {
+			msgid := strings.TrimPrefix(line, "msgid ")
+			msgid = strings.Trim(msgid, `"`)
+			if msgid != "" { // Ignore header msgid
+				foundMsgids = append(foundMsgids, msgid)
+			}
+		}
+	}
+
+	assert.Equal(t, expectedOrder, foundMsgids, "The messages in the output file are not correctly sorted by msgid")
 }

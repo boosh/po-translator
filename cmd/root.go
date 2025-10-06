@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"io/ioutil"
+
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/chai2010/gettext-go/po"
 	"github.com/joho/godotenv"
@@ -223,7 +225,7 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 	if noTranslate {
 		if !dryRun && madeChanges {
 			fileLog.Info().Msg("Saving changes from non-translation operations")
-			if err := poFile.Save(path); err != nil {
+			if err := savePoFile(poFile, path); err != nil {
 				return 0, fmt.Errorf("failed to save file: %w", err)
 			}
 		} else if madeChanges {
@@ -270,7 +272,7 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 		}
 
 		if !dryRun && madeChanges {
-			if err := poFile.Save(path); err != nil {
+			if err := savePoFile(poFile, path); err != nil {
 				return 0, fmt.Errorf("failed to save file after other operations: %w", err)
 			}
 		}
@@ -336,7 +338,7 @@ func processFile(ctx context.Context, provider translator.Provider, path string,
 		// Save progress after each chunk
 		if !dryRun {
 			chunkLog.Debug().Msg("Saving progress to file")
-			if err := poFile.Save(path); err != nil {
+			if err := savePoFile(poFile, path); err != nil {
 				// Return the count of translations successfully processed so far, along with the save error
 				return totalTranslated, fmt.Errorf("failed to save progress after chunk %d-%d: %w", i+1, end, err)
 			}
@@ -536,4 +538,23 @@ func sortMessages(poFile *po.File) bool {
 	}
 
 	return false // Order is the same
+}
+
+// savePoFile saves the po.File to the given path, ensuring the msgid-sorted
+// order of messages is preserved. This bypasses the default library save method
+// which re-sorts by file reference.
+func savePoFile(poFile *po.File, path string) error {
+	var buf bytes.Buffer
+
+	// Write the header first.
+	buf.WriteString(poFile.MimeHeader.String())
+	buf.WriteString("\n")
+
+	// Then, write the messages in their current (sorted) order.
+	for _, msg := range poFile.Messages {
+		buf.WriteString(msg.String())
+		buf.WriteString("\n")
+	}
+
+	return ioutil.WriteFile(path, buf.Bytes(), 0644)
 }
