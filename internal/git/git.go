@@ -44,7 +44,10 @@ func GetRevisionDateFromGit(path string) (string, error) {
 	cmd.Dir = repoRoot // Run the command from the repo root
 	output, err := cmd.Output()
 	if err != nil {
-		// This can happen if the file is not in git, or it's a new file.
+		// If the command fails, include git's stderr for better debugging.
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("could not get file from git HEAD: %w\nstderr: %s", err, string(exitErr.Stderr))
+		}
 		return "", fmt.Errorf("could not get file from git HEAD: %w", err)
 	}
 
