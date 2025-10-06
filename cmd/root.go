@@ -251,10 +251,10 @@ func preprocessFile(path string) (needsTranslation bool, untranslatedCount int, 
 			madeChanges = true
 		}
 	}
-	// if count, changed := clearFuzzyEntries(poFile); changed {
-	// 	fileLog.Info().Int("count", count).Msg("Cleared fuzzy entries")
-	// 	madeChanges = true
-	// }
+	if count, changed := clearFuzzyEntries(poFile); changed {
+		fileLog.Info().Int("count", count).Msg("Cleared fuzzy entries")
+		madeChanges = true
+	}
 	if changed := sortMessages(poFile); changed {
 		fileLog.Info().Msg("Reordered messages by msgid")
 		madeChanges = true
@@ -364,7 +364,9 @@ func logSummary(fileCount int, translationCount, errorCount int64, start time.Ti
 
 func clearFuzzyEntries(poFile *po.File) (fuzzyCount int, madeChanges bool) {
 	for i := range poFile.Messages {
-		if poFile.Messages[i].Comment.GetFuzzy() {
+		// Only clear the translation if the entry is fuzzy AND has a previous
+		// msgid, which indicates a change in the source string.
+		if poFile.Messages[i].Comment.GetFuzzy() && poFile.Messages[i].Comment.PrevMsgId != "" {
 			var newFlags []string
 			for _, flag := range poFile.Messages[i].Comment.Flags {
 				if flag != "fuzzy" {

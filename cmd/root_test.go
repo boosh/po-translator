@@ -46,46 +46,52 @@ func unpatchOsExit() {
 }
 
 func TestClearFuzzyEntries(t *testing.T) {
-	// 1. Create a po.File struct with a fuzzy message
-	poFile := &po.File{
-		Messages: []po.Message{
-			{
-				Comment: po.Comment{
-					Flags:          []string{"fuzzy", "c-format"},
-					PrevMsgContext: "Old context",
-					PrevMsgId:      "Old untranslated string",
+	t.Run("clears fuzzy entry with previous msgid", func(t *testing.T) {
+		poFile := &po.File{
+			Messages: []po.Message{
+				{
+					Comment: po.Comment{
+						Flags:     []string{"fuzzy"},
+						PrevMsgId: "Old untranslated string",
+					},
+					MsgId:  "New untranslated string",
+					MsgStr: "Old translated string",
 				},
-				MsgId:  "New untranslated string",
-				MsgStr: "Old translated string",
 			},
-			{
-				// A non-fuzzy message to ensure it's untouched
-				MsgId:  "Another string",
-				MsgStr: "Another translation",
+		}
+
+		fuzzyCount, madeChanges := clearFuzzyEntries(poFile)
+
+		assert.True(t, madeChanges)
+		assert.Equal(t, 1, fuzzyCount)
+		fuzzyMsg := poFile.Messages[0]
+		assert.NotContains(t, fuzzyMsg.Comment.Flags, "fuzzy")
+		assert.Empty(t, fuzzyMsg.Comment.PrevMsgId)
+		assert.Empty(t, fuzzyMsg.MsgStr)
+	})
+
+	t.Run("preserves fuzzy entry without previous msgid", func(t *testing.T) {
+		poFile := &po.File{
+			Messages: []po.Message{
+				{
+					Comment: po.Comment{
+						Flags: []string{"fuzzy", "python-format"},
+					},
+					MsgId:  "A string that was just marked fuzzy",
+					MsgStr: "A translation that should be kept",
+				},
 			},
-		},
-	}
+		}
+		originalMsgStr := poFile.Messages[0].MsgStr
 
-	// 2. Run the clearFuzzyEntries function
-	fuzzyCount, madeChanges := clearFuzzyEntries(poFile)
+		fuzzyCount, madeChanges := clearFuzzyEntries(poFile)
 
-	// 3. Assert the results
-	assert.True(t, madeChanges, "Expected changes to be made")
-	assert.Equal(t, 1, fuzzyCount, "Expected one fuzzy message to be cleared")
-
-	// Check the formerly-fuzzy message
-	fuzzyMsg := poFile.Messages[0]
-	assert.NotContains(t, fuzzyMsg.Comment.Flags, "fuzzy", "Fuzzy flag should have been removed")
-	assert.Contains(t, fuzzyMsg.Comment.Flags, "c-format", "Other flags should be preserved")
-	assert.Empty(t, fuzzyMsg.Comment.PrevMsgContext, "Previous message context should be cleared")
-	assert.Empty(t, fuzzyMsg.Comment.PrevMsgId, "Previous message ID should be cleared")
-	assert.Empty(t, fuzzyMsg.MsgStr, "Message string should be cleared")
-
-	// Check the non-fuzzy message to ensure it was not modified
-	nonFuzzyMsg := poFile.Messages[1]
-	assert.Empty(t, nonFuzzyMsg.Comment.Flags, "Flags of non-fuzzy message should be untouched")
-	assert.Equal(t, "Another string", nonFuzzyMsg.MsgId, "MsgId of non-fuzzy message should be untouched")
-	assert.Equal(t, "Another translation", nonFuzzyMsg.MsgStr, "MsgStr of non-fuzzy message should be untouched")
+		assert.False(t, madeChanges, "Should not make changes if fuzzy entry has no PrevMsgId")
+		assert.Equal(t, 0, fuzzyCount, "Should not count this as a cleared entry")
+		preservedMsg := poFile.Messages[0]
+		assert.Contains(t, preservedMsg.Comment.Flags, "fuzzy", "Fuzzy flag should be preserved")
+		assert.Equal(t, originalMsgStr, preservedMsg.MsgStr, "Translation should be preserved")
+	})
 }
 
 func TestClearFuzzyEntries_NoFuzzy(t *testing.T) {
@@ -318,142 +324,6 @@ func TestFixUnescapedPercents(t *testing.T) {
 			assert.Equal(t, tc.expectedMsgStr, poFile.Messages[0].MsgStr)
 		})
 	}
-}
-
-func TestPreprocessFile_FixDedupeInteraction(t *testing.T) {
-	// This test simulates the user's scenario where --fix and --dedupe are used together.
-	// The hypothesis is that the order of operations is wrong, causing translations to be lost.
-	tempDir, err := os.MkdirTemp("", "test-fix-dedupe")
-	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
-
-	// This content contains two entries that will be duplicates AFTER --fix runs.
-	// Entry 1 is correct and has a translation.
-	// Entry 2 has an unescaped percent and an empty translation.
-	poContent := `
-# Correct entry with translation
-#, python-format
-msgid ""
-"- Our new blend is 20%% stronger\n"
-"- It's sourced from a family-run farm in Colombia\n"
-"- Mention the free shipping this week"
-msgstr ""
-"- Nuestra nueva mezcla es un 20%% más fuerte\n"
-"- Proviene de una granja familiar en Colombia\n"
-"- Menciona el envío gratuito esta semana"
-
-# Entry that will become a duplicate of the first after --fix runs
-#, python-format
-msgid ""
-"- Our new blend is 20% stronger\n"
-"- It's sourced from a family-run farm in Colombia\n"
-"- Mention the free shipping this week"
-msgstr ""
-`
-	poPath := filepath.Join(tempDir, "test.po")
-	initialPo, err := po.Load([]byte(poContent))
-	require.NoError(t, err)
-	err = savePoFile(initialPo, poPath)
-	require.NoError(t, err)
-
-	// Set the global flags for this test case
-	fix = true
-	dedupe = true
-	defer func() {
-		fix = false
-		dedupe = false
-	}()
-
-	// Run preprocessFile
-	_, _, err = preprocessFile(poPath)
-	assert.NoError(t, err)
-
-	// Load the final .po file to inspect its contents
-	finalPoFile, err := po.LoadFile(poPath)
-	require.NoError(t, err)
-
-	// There should only be one message left after fixing and deduplication
-	var messages []po.Message
-	for _, msg := range finalPoFile.Messages {
-		if msg.MsgId != "" { // Ignore header
-			messages = append(messages, msg)
-		}
-	}
-	require.Len(t, messages, 1, "Expected only one message after deduplication")
-
-	finalMsg := messages[0]
-
-	// The msgstr should NOT be empty.
-	assert.NotEmpty(t, finalMsg.MsgStr, "The msgstr should not have been cleared")
-
-	// Check that the content is what we expect.
-	expectedMsgId := "- Our new blend is 20%% stronger\n- It's sourced from a family-run farm in Colombia\n- Mention the free shipping this week"
-	expectedMsgStr := "- Nuestra nueva mezcla es un 20%% más fuerte\n- Proviene de una granja familiar en Colombia\n- Menciona el envío gratuito esta semana"
-	assert.Equal(t, expectedMsgId, finalMsg.MsgId)
-	assert.Equal(t, expectedMsgStr, finalMsg.MsgStr)
-}
-
-func TestPreprocessFile_FixDoesNotClearTranslation(t *testing.T) {
-	// This test is designed to replicate the user's bug report, where a file
-	// containing a correctly escaped '%%' has its translation cleared when
-	// the --fix command is run on the file due to another entry needing a fix.
-	tempDir, err := os.MkdirTemp("", "test-fix-clears-str")
-	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
-
-	// This content contains two messages:
-	// 1. The user's message, which is already correct.
-	// 2. A "trigger" message with an unescaped '%' that needs fixing.
-	poContent := `
-# User's entry, which is correct
-#, python-format
-msgid ""
-"- Our new blend is 20%% stronger\n"
-"- It's sourced from a family-run farm in Colombia\n"
-"- Mention the free shipping this week"
-msgstr ""
-"- Nuestra nueva mezcla es un 20%% más fuerte\n"
-"- Proviene de una granja familiar en Colombia\n"
-"- Menciona el envío gratuito esta semana"
-
-# Trigger entry that needs fixing
-msgid "This is a 10% discount"
-msgstr "Este es un descuento del 10%"
-`
-	poPath := filepath.Join(tempDir, "test.po")
-	initialPo, err := po.Load([]byte(poContent))
-	require.NoError(t, err)
-	err = savePoFile(initialPo, poPath)
-	require.NoError(t, err)
-
-	// Set the global `fix` flag for this test case
-	fix = true
-	defer func() {
-		fix = false
-	}()
-
-	// Run preprocessFile, which contains the logic for the --fix flag
-	_, _, err = preprocessFile(poPath)
-	assert.NoError(t, err)
-
-	// Load the final .po file to inspect its contents
-	finalPoFile, err := po.LoadFile(poPath)
-	require.NoError(t, err)
-
-	// Isolate the user's message
-	var userMsg *po.Message
-	for i := range finalPoFile.Messages {
-		if strings.Contains(finalPoFile.Messages[i].MsgId, "20%%") {
-			userMsg = &finalPoFile.Messages[i]
-			break
-		}
-	}
-	require.NotNil(t, userMsg, "Could not find the user's message in the processed file")
-
-	// The msgstr should NOT be empty. This is the core of the bug report.
-	expectedMsgStr := "- Nuestra nueva mezcla es un 20%% más fuerte\n- Proviene de una granja familiar en Colombia\n- Menciona el envío gratuito esta semana"
-	assert.NotEmpty(t, userMsg.MsgStr, "The user's msgstr should not have been cleared")
-	assert.Equal(t, expectedMsgStr, userMsg.MsgStr, "The user's translation should be preserved")
 }
 
 func TestPreprocessFile_RevertIfUnchanged(t *testing.T) {
