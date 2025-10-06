@@ -400,8 +400,8 @@ func TestProcessFile_RestoreTimestamp(t *testing.T) {
 	initialPoContent := fmt.Sprintf(`
 msgid ""
 msgstr ""
-"PO-Revision-Date: %s\\n"
-"Language: en\\n"
+"PO-Revision-Date: %s\n"
+"Language: en\n"
 
 msgid "Hello"
 msgstr "Hola"
@@ -420,8 +420,8 @@ msgstr "Hola"
 	modifiedPoContent := fmt.Sprintf(`
 msgid ""
 msgstr ""
-"PO-Revision-Date: %s\\n"
-"Language: en\\n"
+"PO-Revision-Date: %s\n"
+"Language: en\n"
 
 msgid "Hello"
 msgstr "Hola"

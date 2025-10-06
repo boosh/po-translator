@@ -49,8 +49,8 @@ func TestGetRevisionDateFromGit(t *testing.T) {
 		poContent := `
 msgid ""
 msgstr ""
-"PO-Revision-Date: 2023-01-01 12:00+0000\\n"
-"Language: en\\n"
+"PO-Revision-Date: 2023-01-01 12:00+0000\n"
+"Language: en\n"
 `
 		poPath := filepath.Join(tempDir, "test.po")
 		err := os.WriteFile(poPath, []byte(strings.TrimSpace(poContent)), 0644)

@@ -1,10 +1,10 @@
 package git
 
 import (
-	"bufio"
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -40,7 +40,7 @@ func GetRevisionDateFromGit(path string) (string, error) {
 	// Use forward slashes for git path
 	gitPath := filepath.ToSlash(relPath)
 
-	cmd := exec.Command("git", "show", "HEAD:"+gitPath)
+	cmd := exec.Command("git", "show", "HEAD", "--", gitPath)
 	cmd.Dir = repoRoot // Run the command from the repo root
 	output, err := cmd.Output()
 	if err != nil {
@@ -48,20 +48,13 @@ func GetRevisionDateFromGit(path string) (string, error) {
 		return "", fmt.Errorf("could not get file from git HEAD: %w", err)
 	}
 
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, `"PO-Revision-Date:`) {
-			// The line is like: "PO-Revision-Date: 2023-10-27 10:00+0000\n"
-			// We need to extract the date part.
-			trimmedLine := strings.TrimPrefix(line, `"PO-Revision-Date: `)
-			trimmedLine = strings.TrimRight(trimmedLine, `\n"`)
-			return trimmedLine, nil
-		}
-	}
+	// Use a regex to find the PO-Revision-Date line and extract the timestamp.
+	// This is more robust than scanning line by line.
+	re := regexp.MustCompile(`"PO-Revision-Date:\s+([^\\n]+)`)
+	matches := re.FindStringSubmatch(string(output))
 
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("error reading git output: %w", err)
+	if len(matches) > 1 {
+		return matches[1], nil
 	}
 
 	return "", fmt.Errorf("PO-Revision-Date not found in git HEAD")
