@@ -537,6 +537,13 @@ func mergeComments(target *po.Comment, source *po.Comment) {
 		}
 	}
 	target.ReferenceFile = appendIfMissing(target.ReferenceFile, source.ReferenceFile...)
+
+	// Only merge flags that are not "fuzzy"
+	for _, flag := range source.Flags {
+		if flag != "fuzzy" {
+			target.Flags = appendIfMissing(target.Flags, flag)
+		}
+	}
 }
 
 func appendIfMissing(slice []string, items ...string) []string {

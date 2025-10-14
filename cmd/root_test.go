@@ -178,6 +178,29 @@ func TestDeduplicateEntries(t *testing.T) {
 		assert.Len(t, poFile.Messages, 2)
 	})
 
+	t.Run("preserves python-format flag", func(t *testing.T) {
+		poFile := &po.File{
+			Messages: []po.Message{
+				{
+					MsgId:   "Hello %(name)s",
+					MsgStr:  "Hola %(name)s",
+					Comment: po.Comment{Flags: []string{"python-format"}},
+				},
+				{
+					MsgId:  "Hello %(name)s",
+					MsgStr: "Hola %(name)s",
+				},
+			},
+		}
+
+		dedupedCount, madeChanges, err := deduplicateEntries(poFile)
+		assert.NoError(t, err)
+		assert.True(t, madeChanges)
+		assert.Equal(t, 1, dedupedCount)
+		assert.Len(t, poFile.Messages, 1)
+		assert.Contains(t, poFile.Messages[0].Comment.Flags, "python-format", "python-format flag should be preserved")
+	})
+
 	t.Run("removes non-fuzzy duplicate", func(t *testing.T) {
 		poFile := &po.File{
 			Messages: []po.Message{
