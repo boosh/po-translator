@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"regexp"
 	"sort"
@@ -467,30 +466,48 @@ func deduplicateEntries(poFile *po.File) (dedupedCount int, madeChanges bool, er
 		if len(indices) <= 1 {
 			continue
 		}
-		firstMsgStr := poFile.Messages[indices[0]].MsgStr
-		for i := 1; i < len(indices); i++ {
-			if poFile.Messages[indices[i]].MsgStr != firstMsgStr {
-				return 0, false, fmt.Errorf("duplicate msgid '%s' (context: '%s') with different msgstr", poFile.Messages[indices[0]].MsgId, poFile.Messages[indices[0]].MsgContext)
+
+		// Check for conflicting translations among duplicates
+		firstMsgStr := ""
+		hasTranslation := false
+		for _, index := range indices {
+			msgStr := poFile.Messages[index].MsgStr
+			if msgStr != "" {
+				if hasTranslation && msgStr != firstMsgStr {
+					return 0, false, fmt.Errorf("duplicate msgid '%s' (context: '%s') with conflicting msgstr: '%s' vs '%s'",
+						poFile.Messages[indices[0]].MsgId, poFile.Messages[indices[0]].MsgContext, firstMsgStr, msgStr)
+				}
+				firstMsgStr = msgStr
+				hasTranslation = true
 			}
 		}
+
+		// Determine which entry to keep
 		keepIndex := -1
+		// Prefer non-fuzzy entries
 		for _, index := range indices {
 			if !poFile.Messages[index].Comment.GetFuzzy() {
 				keepIndex = index
 				break
 			}
 		}
+		// Otherwise, just keep the first one
 		if keepIndex == -1 {
 			keepIndex = indices[0]
 		}
+
+		// Merge comments and mark others for removal
 		for _, index := range indices {
 			if index != keepIndex {
+				mergeComments(&poFile.Messages[keepIndex].Comment, &poFile.Messages[index].Comment)
 				indicesToRemove[index] = struct{}{}
 			}
 		}
+		poFile.Messages[keepIndex].MsgStr = firstMsgStr
 	}
 
 	if len(indicesToRemove) > 0 {
+		madeChanges = true
 		var newMessages []po.Message
 		for i, msg := range poFile.Messages {
 			if _, shouldRemove := indicesToRemove[i]; !shouldRemove {
@@ -500,7 +517,42 @@ func deduplicateEntries(poFile *po.File) (dedupedCount int, madeChanges bool, er
 		poFile.Messages = newMessages
 		return len(indicesToRemove), true, nil
 	}
+
 	return 0, false, nil
+}
+
+func mergeComments(target *po.Comment, source *po.Comment) {
+	if source.TranslatorComment != "" {
+		if target.TranslatorComment == "" {
+			target.TranslatorComment = source.TranslatorComment
+		} else if !strings.Contains(target.TranslatorComment, source.TranslatorComment) {
+			target.TranslatorComment += "\n" + source.TranslatorComment
+		}
+	}
+	if source.ExtractedComment != "" {
+		if target.ExtractedComment == "" {
+			target.ExtractedComment = source.ExtractedComment
+		} else if !strings.Contains(target.ExtractedComment, source.ExtractedComment) {
+			target.ExtractedComment += "\n" + source.ExtractedComment
+		}
+	}
+	target.ReferenceFile = appendIfMissing(target.ReferenceFile, source.ReferenceFile...)
+}
+
+func appendIfMissing(slice []string, items ...string) []string {
+	for _, item := range items {
+		found := false
+		for _, s := range slice {
+			if s == item {
+				found = true
+				break
+			}
+		}
+		if !found {
+			slice = append(slice, item)
+		}
+	}
+	return slice
 }
 
 func fixUnescapedPercents(poFile *po.File) (fixCount int, madeChanges bool) {
@@ -565,9 +617,11 @@ func savePoFile(poFile *po.File, path string) error {
 	var buf bytes.Buffer
 	buf.WriteString(poFile.MimeHeader.String())
 	buf.WriteString("\n")
+
 	for _, msg := range poFile.Messages {
 		buf.WriteString(msg.String())
 		buf.WriteString("\n")
 	}
-	return ioutil.WriteFile(path, buf.Bytes(), 0644)
+
+	return os.WriteFile(path, buf.Bytes(), 0644)
 }
