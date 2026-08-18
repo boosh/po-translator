@@ -33,6 +33,7 @@ var (
 	provider          string
 	model             string
 	apiKey            string
+	baseURL           string
 	temperature       float32
 	maxRetries        int
 	retryDelay        time.Duration
@@ -63,9 +64,10 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&logFile, "log-file", "", "Path to log file for output")
 	rootCmd.PersistentFlags().BoolVar(&strict, "strict", false, "Exit immediately on any error")
 
-	rootCmd.Flags().StringVar(&provider, "provider", "", "AI provider: anthropic, google (required)")
-	rootCmd.Flags().StringVar(&model, "model", "", "Model name to use for translation (required)")
+	rootCmd.Flags().StringVar(&provider, "provider", "digitalocean", "AI provider: digitalocean, google")
+	rootCmd.Flags().StringVar(&model, "model", "", "Model name to use for translation (defaults to "+translator.DefaultDigitalOceanModel+" for the digitalocean provider, required otherwise)")
 	rootCmd.Flags().StringVar(&apiKey, "api-key", "", "API key (optional, overrides env vars)")
+	rootCmd.Flags().StringVar(&baseURL, "base-url", "", "Base URL for the provider API (optional, digitalocean defaults to "+translator.DefaultDigitalOceanBaseURL+")")
 	rootCmd.Flags().Float32Var(&temperature, "temperature", 0.3, "Temperature for AI generation")
 	rootCmd.Flags().IntVar(&maxRetries, "max-retries", 3, "Max retries for failed API calls")
 	rootCmd.Flags().DurationVar(&retryDelay, "retry-delay", 2*time.Second, "Delay between retries")
@@ -218,6 +220,9 @@ func initProvider(ctx context.Context) (translator.Provider, error) {
 	if provider == "" {
 		return nil, fmt.Errorf("error: --provider is required unless --no-translate is set")
 	}
+	if model == "" && provider == "digitalocean" {
+		model = translator.DefaultDigitalOceanModel
+	}
 	if model == "" {
 		return nil, fmt.Errorf("error: --model is required unless --no-translate is set")
 	}
@@ -226,6 +231,7 @@ func initProvider(ctx context.Context) (translator.Provider, error) {
 		Provider:    provider,
 		Model:       model,
 		APIKey:      apiKey,
+		BaseURL:     baseURL,
 		Temperature: temperature,
 		MaxRetries:  maxRetries,
 		LogPrompt:   logPrompt,
@@ -349,7 +355,10 @@ func translateFile(ctx context.Context, provider translator.Provider, path strin
 		return 0, fmt.Errorf("failed to load po file for translation: %w", err)
 	}
 
-	type job struct{ Index int; Msg po.Message }
+	type job struct {
+		Index int
+		Msg   po.Message
+	}
 	var untranslatedJobs []job
 	for i, msg := range poFile.Messages {
 		if !isMessageTranslated(msg) {

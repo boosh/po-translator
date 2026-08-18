@@ -10,7 +10,8 @@ A Go CLI tool that manages Django/gettext `.po` file translations using AI servi
     - **Fuzzy Handling:** Intelligently clears `fuzzy` markers, keeping valid translations and removing incorrect ones.
 - **AI-Powered Translations:**
     - **Parallel Processing:** Translates multiple `.po` files concurrently for maximum speed.
-    - **Configurable Providers:** Supports multiple AI providers (currently Google Gemini).
+  - **Configurable Providers:** Supports multiple AI providers (DeepSeek on DigitalOcean by default, plus Google
+    Gemini).
     - **Incremental Progress:** Saves translations after each chunk, preventing data loss from interruptions.
 - **Workflow Integration:**
     - **Idempotent & Safe:** Designed to be run frequently. Files are sorted by `msgid` to ensure stable diffs.
@@ -26,7 +27,8 @@ A Go CLI tool that manages Django/gettext `.po` file translations using AI servi
 
 1.  **Prerequisites:**
     *   Go 1.21+ installed.
-    *   An API key for your chosen AI provider (e.g., Google AI Studio).
+    * [`just`](https://github.com/casey/just) installed (`brew install just`) to use the recipes below.
+    * An API key for your chosen AI provider (e.g., a DigitalOcean model access key, or Google AI Studio).
 
 2.  **Clone the repository:**
     ```bash
@@ -36,46 +38,49 @@ A Go CLI tool that manages Django/gettext `.po` file translations using AI servi
 
 3.  **Build from source:**
     ```bash
-    make build
+    just build
     ```
     This will create a `po-translator` executable in the current directory.
 
 4.  **Install (optional):**
     To make the tool available system-wide, you can install it to your Go bin directory:
     ```bash
-    make install
+    just install
     ```
     Ensure that `$(go env GOPATH)/bin` is in your system's `PATH`.
 
 ## Quick Start
 
 1.  **Set up your environment:**
-    Create a `.env` file in the project root and add your API key. For example, for Google Gemini:
+    Create a `.env` file in the project root and add your API key. The default provider is DeepSeek on DigitalOcean:
     ```
     # .env
-    GOOGLE_API_KEY=your_google_api_key_here
+    DIGITALOCEAN_MODEL_ACCESS_KEY=your_digitalocean_model_access_key_here
     ```
-    Alternatively, you can use the `--api-key` flag.
+    For Google Gemini, set `GOOGLE_API_KEY` instead. Alternatively, you can use the `--api-key` flag.
 
 2.  **Run a full cleanup and translation:**
     This is the recommended command for a typical Django project. It finds all `django.po` files, fixes common issues, removes duplicates, translates new entries, and reverts files that had no translation changes. It's designed to be run frequently.
 
     ```bash
-    ./po-translator --provider google --model gemini-flash-latest --fix --dedupe --revert-if-unchanged '*/locale/**/django.po'
+    ./po-translator --fix --dedupe --revert-if-unchanged '*/locale/**/django.po'
     ```
+
+    This uses the default provider and model. To use Google Gemini instead, add
+    `--provider google --model gemini-flash-latest`.
 
 3.  **Perform a dry run:**
     To see what the tool *would* do without making any changes, use the `--dry-run` or `-n` flag.
 
     ```bash
-    ./po-translator --provider=google --model=gemini-flash-latest -n "locale/**/*.po"
+    ./po-translator -n "locale/**/*.po"
     ```
 
 4.  **Test with a limited number of translations:**
     To test the translation process on a small subset of entries, use the `--max-translations` flag.
 
     ```bash
-    ./po-translator --provider=google --model=gemini-flash-latest --max-translations=5 "locale/**/*.po"
+    ./po-translator --max-translations=5 "locale/**/*.po"
     ```
 
 ## Recommended Workflow
@@ -111,32 +116,41 @@ po-translator [flags] <glob-pattern...>
 
 ### Flags
 
-| Flag                       | Type       | Default | Description                                                                      |
-| -------------------------- | ---------- | ------- | -------------------------------------------------------------------------------- |
-| **Translation**            |            |         |                                                                                  |
-| `--provider`               | `string`   |         | **(Required)** AI provider to use: `google`.                                     |
-| `--model`                  | `string`   |         | **(Required)** Model name to use for translation.                                |
-| `--api-key`                | `string`   |         | API key for the provider. Overrides environment variables.                       |
-| `--no-translate`           | `bool`     | `false` | Disable translation and only perform cleanup operations.                         |
-| `--max-translations`       | `int`      | `0`     | Max number of entries to translate per file (0 for no limit).                    |
-| **Cleanup**                |            |         |                                                                                  |
-| `--fix`                    | `bool`     | `false` | Fix unescaped percent signs (`%` -> `%%`).                                       |
-| `--dedupe`                 | `bool`     | `false` | Remove duplicate entries with the same `msgid`.                                  |
-| `--revert-if-unchanged`    | `bool`     | `false` | Revert file to `git HEAD` if no new translations were made.                      |
-| **Behavior**               |            |         |                                                                                  |
-| `--dry-run`, `-n`          | `bool`     | `false` | Process files but do not write any changes.                                      |
-| `--yes`, `-y`              | `bool`     | `false` | Automatically answer "yes" to all prompts and skip confirmation.                 |
-| `--strict`                 | `bool`     | `false` | Exit immediately on any error.                                                   |
-| `--chunk-size`             | `int`      | `50`    | Number of entries to translate per AI request.                                   |
-| `--max-retries`            | `int`      | `3`     | Max retries for failed API calls.                                                |
-| `--retry-delay`            | `duration` | `2s`    | Delay between retries (e.g., `2s`, `500ms`).                                     |
-| `--temperature`            | `float`    | `0.3`   | Temperature for AI generation (0.0 to 1.0).                                      |
-| **Logging**                |            |         |                                                                                  |
-| `--log-level`              | `string`   | `info`  | Log level (`debug`, `info`, `warn`, `error`).                                    |
-| `--log-file`               | `string`   |         | Path to log file for output. Defaults to stderr.                                 |
-| `--log-prompt`             | `bool`     | `false` | Log the full prompt sent to the AI provider (for debugging).                     |
+| Flag                    | Type       | Default        | Description                                                                                               |
+|-------------------------|------------|----------------|-----------------------------------------------------------------------------------------------------------|
+| **Translation**         |            |                |                                                                                                           |
+| `--provider`            | `string`   | `digitalocean` | AI provider to use: `digitalocean`, `google`.                                                             |
+| `--model`               | `string`   |                | Model name to use. Defaults to `deepseek-v4-flash-0731` for `digitalocean`; required for other providers. |
+| `--api-key`             | `string`   |                | API key for the provider. Overrides environment variables.                                                |
+| `--base-url`            | `string`   |                | Base URL for the provider API. Overrides environment variables.                                           |
+| `--no-translate`        | `bool`     | `false`        | Disable translation and only perform cleanup operations.                                                  |
+| `--max-translations`    | `int`      | `0`            | Max number of entries to translate per file (0 for no limit).                                             |
+| **Cleanup**             |            |                |                                                                                                           |
+| `--fix`                 | `bool`     | `false`        | Fix unescaped percent signs (`%` -> `%%`).                                                                |
+| `--dedupe`              | `bool`     | `false`        | Remove duplicate entries with the same `msgid`.                                                           |
+| `--revert-if-unchanged` | `bool`     | `false`        | Revert file to `git HEAD` if no new translations were made.                                               |
+| **Behavior**            |            |                |                                                                                                           |
+| `--dry-run`, `-n`       | `bool`     | `false`        | Process files but do not write any changes.                                                               |
+| `--yes`, `-y`           | `bool`     | `false`        | Automatically answer "yes" to all prompts and skip confirmation.                                          |
+| `--strict`              | `bool`     | `false`        | Exit immediately on any error.                                                                            |
+| `--chunk-size`          | `int`      | `50`           | Number of entries to translate per AI request.                                                            |
+| `--max-retries`         | `int`      | `3`            | Max retries for failed API calls.                                                                         |
+| `--retry-delay`         | `duration` | `2s`           | Delay between retries (e.g., `2s`, `500ms`).                                                              |
+| `--temperature`         | `float`    | `0.3`          | Temperature for AI generation (0.0 to 1.0).                                                               |
+| **Logging**             |            |                |                                                                                                           |
+| `--log-level`           | `string`   | `info`         | Log level (`debug`, `info`, `warn`, `error`).                                                             |
+| `--log-file`            | `string`   |                | Path to log file for output. Defaults to stderr.                                                          |
+| `--log-prompt`          | `bool`     | `false`        | Log the full prompt sent to the AI provider (for debugging).                                              |
 
 ## AI Provider Setup
+
+### DeepSeek on DigitalOcean
+
+- **Provider Name:** `digitalocean` (the default)
+- **Environment Variable:** `DIGITALOCEAN_MODEL_ACCESS_KEY`
+- **Models:** `deepseek-v4-flash-0731` (the default), or any other model served by the endpoint.
+- **Endpoint:** DigitalOcean's OpenAI-compatible serverless inference API at `https://inference.do-ai.run/v1`. Override
+  it with `DIGITALOCEAN_INFERENCE_BASE_URL` or `--base-url`.
 
 ### Google Gemini
 -   **Provider Name:** `google`
@@ -152,10 +166,21 @@ po-translator [flags] <glob-pattern...>
 
 ### Building
 ```bash
-make build
+just build
 ```
+
+Run `just --list` to see all recipes. `just run <flags> <glob>` builds and then runs the tool, and `just dev <glob>`
+runs it straight from source as a dry run with debug logging.
 
 ### Running Tests
 ```bash
-make test
+just test
+```
+
+### Before Committing
+
+Format, lint and test in one go:
+
+```bash
+just check
 ```
