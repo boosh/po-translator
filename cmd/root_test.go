@@ -277,76 +277,76 @@ func TestDeduplicateEntries(t *testing.T) {
 
 func TestFixUnescapedPercents(t *testing.T) {
 	testCases := []struct {
-		name          string
-		inputMsgId    string
-		inputMsgStr   string
-		expectedMsgId string
+		name           string
+		inputMsgId     string
+		inputMsgStr    string
+		expectedMsgId  string
 		expectedMsgStr string
-		expectedCount int
-		expectChange  bool
+		expectedCount  int
+		expectChange   bool
 	}{
 		{
-			name:          "simple case",
-			inputMsgId:    "A 10% discount",
-			inputMsgStr:   "Un descuento del 10%",
-			expectedMsgId: "A 10%% discount",
+			name:           "simple case",
+			inputMsgId:     "A 10% discount",
+			inputMsgStr:    "Un descuento del 10%",
+			expectedMsgId:  "A 10%% discount",
 			expectedMsgStr: "Un descuento del 10%%",
-			expectedCount: 1,
-			expectChange:  true,
+			expectedCount:  1,
+			expectChange:   true,
 		},
 		{
-			name:          "no unescaped percents",
-			inputMsgId:    "A simple string",
-			inputMsgStr:   "Una cadena simple",
-			expectedMsgId: "A simple string",
+			name:           "no unescaped percents",
+			inputMsgId:     "A simple string",
+			inputMsgStr:    "Una cadena simple",
+			expectedMsgId:  "A simple string",
 			expectedMsgStr: "Una cadena simple",
-			expectedCount: 0,
-			expectChange:  false,
+			expectedCount:  0,
+			expectChange:   false,
 		},
 		{
-			name:          "already escaped",
-			inputMsgId:    "A 10%% discount",
-			inputMsgStr:   "Un descuento del 10%%",
-			expectedMsgId: "A 10%% discount",
+			name:           "already escaped",
+			inputMsgId:     "A 10%% discount",
+			inputMsgStr:    "Un descuento del 10%%",
+			expectedMsgId:  "A 10%% discount",
 			expectedMsgStr: "Un descuento del 10%%",
-			expectedCount: 0,
-			expectChange:  false,
+			expectedCount:  0,
+			expectChange:   false,
 		},
 		{
-			name:          "valid python format specifier",
-			inputMsgId:    "Hello, %(name)s!",
-			inputMsgStr:   "¡Hola, %(name)s!",
-			expectedMsgId: "Hello, %(name)s!",
+			name:           "valid python format specifier",
+			inputMsgId:     "Hello, %(name)s!",
+			inputMsgStr:    "¡Hola, %(name)s!",
+			expectedMsgId:  "Hello, %(name)s!",
 			expectedMsgStr: "¡Hola, %(name)s!",
-			expectedCount: 0,
-			expectChange:  false,
+			expectedCount:  0,
+			expectChange:   false,
 		},
 		{
-			name:          "valid c-style format specifier",
-			inputMsgId:    "Found %d items",
-			inputMsgStr:   "Se encontraron %d artículos",
-			expectedMsgId: "Found %d items",
+			name:           "valid c-style format specifier",
+			inputMsgId:     "Found %d items",
+			inputMsgStr:    "Se encontraron %d artículos",
+			expectedMsgId:  "Found %d items",
 			expectedMsgStr: "Se encontraron %d artículos",
-			expectedCount: 0,
-			expectChange:  false,
+			expectedCount:  0,
+			expectChange:   false,
 		},
 		{
-			name:          "mixed case",
-			inputMsgId:    "A 10% discount for %(name)s",
-			inputMsgStr:   "Un 10% de descuento para %(name)s",
-			expectedMsgId: "A 10%% discount for %(name)s",
+			name:           "mixed case",
+			inputMsgId:     "A 10% discount for %(name)s",
+			inputMsgStr:    "Un 10% de descuento para %(name)s",
+			expectedMsgId:  "A 10%% discount for %(name)s",
 			expectedMsgStr: "Un 10%% de descuento para %(name)s",
-			expectedCount: 1,
-			expectChange:  true,
+			expectedCount:  1,
+			expectChange:   true,
 		},
 		{
-			name:          "only in msgstr",
-			inputMsgId:    "A discount",
-			inputMsgStr:   "Un descuento del 10%",
-			expectedMsgId: "A discount",
+			name:           "only in msgstr",
+			inputMsgId:     "A discount",
+			inputMsgStr:    "Un descuento del 10%",
+			expectedMsgId:  "A discount",
 			expectedMsgStr: "Un descuento del 10%%",
-			expectedCount: 1,
-			expectChange:  true,
+			expectedCount:  1,
+			expectChange:   true,
 		},
 	}
 

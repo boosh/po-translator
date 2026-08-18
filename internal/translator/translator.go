@@ -16,6 +16,8 @@ func NewProvider(ctx context.Context, config Config) (Provider, error) {
 		return NewAnthropicProvider(config)
 	case "google":
 		return NewGoogleProvider(ctx, config)
+	case "digitalocean":
+		return NewDigitalOceanProvider(ctx, config)
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", config.Provider)
 	}
