@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -815,4 +816,153 @@ func TestInitProviderResolvesProviderAndModel(t *testing.T) {
 	assert.Equal(t, "anthropic/claude-sonnet-4.5", gotConfig.Model)
 	assert.Equal(t, "https://flag.invalid/v1", gotConfig.BaseURL)
 	assert.Equal(t, "flag-key", gotConfig.APIKey)
+}
+
+// scriptedProvider fails or succeeds per call according to shouldFail, so tests
+// can drive the chunk-splitting and continue-on-error paths.
+type scriptedProvider struct {
+	shouldFail func(messages []po.Message) error
+	calls      [][]string
+}
+
+func (s *scriptedProvider) Translate(ctx context.Context, messages []po.Message, sourceLang, targetLang string, nplurals int) ([]translator.TranslationResult, error) {
+	var ids []string
+	for _, msg := range messages {
+		ids = append(ids, msg.MsgId)
+	}
+	s.calls = append(s.calls, ids)
+
+	if err := s.shouldFail(messages); err != nil {
+		return nil, err
+	}
+
+	results := make([]translator.TranslationResult, len(messages))
+	for i, msg := range messages {
+		results[i] = translator.TranslationResult{MsgStr: "translated:" + msg.MsgId}
+	}
+	return results, nil
+}
+
+func (s *scriptedProvider) String() string { return "scripted" }
+
+// writeUntranslatedPoFile writes a .po file whose entries all need translating.
+func writeUntranslatedPoFile(t *testing.T, msgIDs ...string) string {
+	t.Helper()
+
+	var b strings.Builder
+	b.WriteString("msgid \"\"\nmsgstr \"\"\n\"Content-Type: text/plain; charset=UTF-8\\n\"\n\n")
+	for _, id := range msgIDs {
+		fmt.Fprintf(&b, "msgid \"%s\"\nmsgstr \"\"\n\n", id)
+	}
+
+	path := filepath.Join(t.TempDir(), "django.po")
+	require.NoError(t, os.WriteFile(path, []byte(b.String()), 0644))
+	return path
+}
+
+// translatedMsgStrs reads back the translations a run produced, keyed by msgid.
+func translatedMsgStrs(t *testing.T, path string) map[string]string {
+	t.Helper()
+
+	poFile, err := po.LoadFile(path)
+	require.NoError(t, err)
+
+	got := make(map[string]string)
+	for _, msg := range poFile.Messages {
+		if msg.MsgStr != "" {
+			got[msg.MsgId] = msg.MsgStr
+		}
+	}
+	return got
+}
+
+func TestTranslateFileHalvesUnusableChunk(t *testing.T) {
+	path := writeUntranslatedPoFile(t, "a", "b", "c", "d")
+
+	// The model can only manage half a chunk at a time.
+	provider := &scriptedProvider{shouldFail: func(messages []po.Message) error {
+		if len(messages) > 2 {
+			return fmt.Errorf("%w: mismatch between requested (%d) and received (0) translations", translator.ErrUnusableResponse, len(messages))
+		}
+		return nil
+	}}
+
+	translated, err := translateFile(context.Background(), provider, path, 4)
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), translated)
+
+	// One failed request at 4, then both halves of 2.
+	require.Len(t, provider.calls, 3)
+	assert.Equal(t, []string{"a", "b", "c", "d"}, provider.calls[0])
+	assert.Equal(t, []string{"a", "b"}, provider.calls[1])
+	assert.Equal(t, []string{"c", "d"}, provider.calls[2])
+
+	got := translatedMsgStrs(t, path)
+	assert.Len(t, got, 4)
+	assert.Equal(t, "translated:d", got["d"])
+}
+
+func TestTranslateFileHalvingIsPerChunk(t *testing.T) {
+	path := writeUntranslatedPoFile(t, "a", "b", "c", "d")
+
+	// Only the first chunk is troublesome; the second must still go out whole.
+	provider := &scriptedProvider{shouldFail: func(messages []po.Message) error {
+		if len(messages) == 2 && messages[0].MsgId == "a" {
+			return fmt.Errorf("%w: mismatch between requested (2) and received (1) translations", translator.ErrUnusableResponse)
+		}
+		return nil
+	}}
+
+	translated, err := translateFile(context.Background(), provider, path, 2)
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), translated)
+
+	require.Len(t, provider.calls, 4)
+	assert.Equal(t, []string{"a", "b"}, provider.calls[0])
+	assert.Equal(t, []string{"a"}, provider.calls[1])
+	assert.Equal(t, []string{"b"}, provider.calls[2])
+	// The next chunk went out at the configured size, not the halved one.
+	assert.Equal(t, []string{"c", "d"}, provider.calls[3])
+}
+
+func TestTranslateFileContinuesAfterFailedChunk(t *testing.T) {
+	path := writeUntranslatedPoFile(t, "a", "b", "c", "d")
+
+	// A refused key fails every time and is not worth splitting up.
+	provider := &scriptedProvider{shouldFail: func(messages []po.Message) error {
+		if messages[0].MsgId == "a" {
+			return fmt.Errorf("401 Unauthorized")
+		}
+		return nil
+	}}
+
+	translated, err := translateFile(context.Background(), provider, path, 2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1 of 2 chunks failed")
+	assert.Equal(t, int64(2), translated)
+
+	// The failure was not split, and the following chunk still ran.
+	require.Len(t, provider.calls, 2)
+	assert.Equal(t, []string{"a", "b"}, provider.calls[0])
+	assert.Equal(t, []string{"c", "d"}, provider.calls[1])
+
+	// The entries that failed stay empty, so a later run picks them up.
+	got := translatedMsgStrs(t, path)
+	assert.Equal(t, map[string]string{"c": "translated:c", "d": "translated:d"}, got)
+}
+
+func TestTranslateFileStrictStopsAtFirstFailedChunk(t *testing.T) {
+	path := writeUntranslatedPoFile(t, "a", "b", "c", "d")
+
+	strict = true
+	defer func() { strict = false }()
+
+	provider := &scriptedProvider{shouldFail: func(messages []po.Message) error {
+		return fmt.Errorf("401 Unauthorized")
+	}}
+
+	_, err := translateFile(context.Background(), provider, path, 2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "chunk 1-2")
+	assert.Len(t, provider.calls, 1, "strict mode should not try the next chunk")
 }

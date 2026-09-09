@@ -3,6 +3,7 @@ package translator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -48,6 +49,11 @@ func retryBackoff(delay time.Duration, attempt int) time.Duration {
 	}
 	return delay * time.Duration(1<<attempt)
 }
+
+// ErrUnusableResponse marks a reply that arrived intact but could not be turned
+// into one translation per message. Callers use it to tell a bad answer, which
+// a smaller request may fix, from a failure that will repeat whatever is asked.
+var ErrUnusableResponse = errors.New("unusable response")
 
 // promptEntry is a struct used for marshalling message data for the prompt.
 type promptEntry struct {
@@ -133,11 +139,11 @@ func parseTranslationResults(raw string, want int) ([]TranslationResult, error) 
 	cleanJSON = strings.Trim(cleanJSON, " \n\r\t")
 
 	if err := json.Unmarshal([]byte(cleanJSON), &translations); err != nil {
-		return nil, fmt.Errorf("failed to parse response JSON: %w. Response: %s", err, raw)
+		return nil, fmt.Errorf("%w: failed to parse response JSON: %v. Response: %s", ErrUnusableResponse, err, raw)
 	}
 
 	if len(translations) != want {
-		return nil, fmt.Errorf("mismatch between requested (%d) and received (%d) translations", want, len(translations))
+		return nil, fmt.Errorf("%w: mismatch between requested (%d) and received (%d) translations", ErrUnusableResponse, want, len(translations))
 	}
 	return translations, nil
 }

@@ -53,26 +53,39 @@ func (p *GoogleProvider) Translate(ctx context.Context, messages []po.Message, s
 		log.Info().Str("provider", "google").Str("prompt", prompt).Msg("Sending prompt to AI")
 	}
 
-	var resp *genai.GenerateContentResponse
-	for i := 0; i < p.config.MaxRetries; i++ {
+	// A usable answer is a call that succeeds and a body that parses into one
+	// translation per message. A model returning the wrong number of entries is
+	// as retriable as a network failure, so both are retried the same way.
+	for attempt := 0; attempt < p.config.MaxRetries; attempt++ {
+		var resp *genai.GenerateContentResponse
 		resp, err = p.client.GenerateContent(ctx, genai.Text(prompt))
+
+		var results []TranslationResult
 		if err == nil {
-			break // Success
+			results, err = resultsFromGenerateContent(resp, len(messages))
+		}
+		if err == nil {
+			return results, nil
+		}
+
+		if attempt == p.config.MaxRetries-1 {
+			break
 		}
 		log.Warn().
 			Err(err).
-			Int("attempt", i+1).
+			Int("attempt", attempt+1).
 			Int("max_retries", p.config.MaxRetries).
-			Msg("Google API call failed, retrying...")
-		time.Sleep(retryBackoff(p.config.RetryDelay, i)) // Exponential backoff
+			Msg("Translation attempt failed, retrying...")
+		time.Sleep(retryBackoff(p.config.RetryDelay, attempt)) // Exponential backoff
 	}
 
-	if err != nil {
-		return nil, fmt.Errorf("google API call failed after %d retries: %w", p.config.MaxRetries, err)
-	}
+	return nil, fmt.Errorf("google translation failed after %d attempts: %w", p.config.MaxRetries, err)
+}
 
+// resultsFromGenerateContent pulls the translations out of a Gemini response.
+func resultsFromGenerateContent(resp *genai.GenerateContentResponse, want int) ([]TranslationResult, error) {
 	if len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil || len(resp.Candidates[0].Content.Parts) == 0 {
-		return nil, fmt.Errorf("google API returned empty content")
+		return nil, fmt.Errorf("%w: google API returned empty content", ErrUnusableResponse)
 	}
 
 	part := resp.Candidates[0].Content.Parts[0]
@@ -81,5 +94,5 @@ func (p *GoogleProvider) Translate(ctx context.Context, messages []po.Message, s
 		return nil, fmt.Errorf("unexpected part type in Google response: %T", part)
 	}
 
-	return parseTranslationResults(string(text), len(messages))
+	return parseTranslationResults(string(text), want)
 }

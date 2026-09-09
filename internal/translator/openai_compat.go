@@ -69,31 +69,43 @@ func (p *OpenAICompatibleProvider) Translate(ctx context.Context, messages []po.
 		log.Info().Str("provider", p.config.Provider).Str("prompt", prompt).Msg("Sending prompt to AI")
 	}
 
-	var resp *openai.ChatCompletion
-	for i := 0; i < p.config.MaxRetries; i++ {
+	// A usable answer is a call that succeeds and a body that parses into one
+	// translation per message. A model returning the wrong number of entries is
+	// as retriable as a network failure, so both are retried the same way.
+	for attempt := 0; attempt < p.config.MaxRetries; attempt++ {
+		var resp *openai.ChatCompletion
 		resp, err = p.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 			Model:       p.config.Model,
 			Messages:    []openai.ChatCompletionMessageParamUnion{openai.UserMessage(prompt)},
 			Temperature: openai.Float(temperatureAsFloat64(p.config.Temperature)),
 		})
+
+		var results []TranslationResult
 		if err == nil {
-			break // Success
+			results, err = resultsFromChatCompletion(resp, len(messages), p.config.Provider)
+		}
+		if err == nil {
+			return results, nil
+		}
+
+		if attempt == p.config.MaxRetries-1 {
+			break
 		}
 		log.Warn().
 			Err(err).
-			Int("attempt", i+1).
+			Int("attempt", attempt+1).
 			Int("max_retries", p.config.MaxRetries).
-			Msg("API call failed, retrying...")
-		time.Sleep(retryBackoff(p.config.RetryDelay, i)) // Exponential backoff
+			Msg("Translation attempt failed, retrying...")
+		time.Sleep(retryBackoff(p.config.RetryDelay, attempt)) // Exponential backoff
 	}
 
-	if err != nil {
-		return nil, fmt.Errorf("%s API call failed after %d retries: %w", p.config.Provider, p.config.MaxRetries, err)
-	}
+	return nil, fmt.Errorf("%s translation failed after %d attempts: %w", p.config.Provider, p.config.MaxRetries, err)
+}
 
+// resultsFromChatCompletion pulls the translations out of a chat completion.
+func resultsFromChatCompletion(resp *openai.ChatCompletion, want int, provider string) ([]TranslationResult, error) {
 	if len(resp.Choices) == 0 || resp.Choices[0].Message.Content == "" {
-		return nil, fmt.Errorf("%s API returned empty content", p.config.Provider)
+		return nil, fmt.Errorf("%w: %s API returned empty content", ErrUnusableResponse, provider)
 	}
-
-	return parseTranslationResults(resp.Choices[0].Message.Content, len(messages))
+	return parseTranslationResults(resp.Choices[0].Message.Content, want)
 }

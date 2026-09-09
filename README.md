@@ -100,12 +100,22 @@ The process is broken into two main passes:
     *   The cleaned-up file is saved.
 
 2.  **Translation Pass:** After cleanup, the tool identifies files that still contain untranslated entries.
-    *   It prompts the user for confirmation, showing a summary of work to be done.
+    * It prompts the user for confirmation, showing a summary of work to be done, along with the provider and model it
+      will use.
     *   If confirmed, it sends the untranslated entries to the AI provider in chunks.
     *   Progress is saved after each chunk to prevent data loss.
+    * A request is retried up to `--max-retries` times, whether it failed outright or came back with the wrong number of
+      entries.
+    * A chunk that is still unusable is halved and the halves are sent separately, up to twice. Only that chunk shrinks;
+      the rest of the file continues at `--chunk-size`.
+    * A chunk that fails for good does not stop the file. The run moves to the next chunk, leaving those entries
+      untranslated for a later run to pick up. `--strict` stops at the first failure instead.
     *   If a file has no untranslated entries after the pre-processing pass and the `--revert-if-unchanged` flag is used, the tool will revert the file to its `HEAD` state in git. This prevents commits that only contain whitespace or sorting changes.
 
 This two-pass design ensures that cleanup and translation are decoupled, and that AI credits are only used when necessary and after user confirmation.
+
+Because each chunk is saved as it completes and every run only sends entries whose `msgstr` is empty, re-running the
+same command is how you retry failures. Nothing already translated is paid for twice.
 
 ## CLI Reference
 
@@ -137,7 +147,7 @@ po-translator [flags] <glob-pattern...>
 | `--yes`, `-y`           | `bool`     | `false` | Automatically answer "yes" to all prompts and skip confirmation.                                                                        |
 | `--strict`              | `bool`     | `false` | Exit immediately on any error.                                                                                                          |
 | `--chunk-size`          | `int`      | `50`    | Number of entries to translate per AI request.                                                                                          |
-| `--max-retries`         | `int`      | `3`     | Max retries for failed API calls.                                                                                                       |
+| `--max-retries`         | `int`      | `3`     | Max attempts per chunk, covering both failed API calls and unusable responses.                                                          |
 | `--retry-delay`         | `duration` | `2s`    | Base delay before retrying a failed API call, doubling each attempt (e.g., `2s`, `500ms`).                                              |
 | `--temperature`         | `float`    | `0.3`   | Temperature for AI generation (0.0 to 1.0).                                                                                             |
 | **Logging**             |            |         |                                                                                                                                         |

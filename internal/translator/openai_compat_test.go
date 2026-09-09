@@ -127,3 +127,75 @@ func TestOpenAICompatibleProviderRetryUsesConfiguredDelay(t *testing.T) {
 	assert.Greater(t, elapsed, 10*time.Millisecond)
 	assert.Less(t, elapsed, time.Second)
 }
+
+func TestOpenAICompatibleProviderRetriesCountMismatch(t *testing.T) {
+	var requests int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		// The first answer is short by one, the way models sometimes drop an entry.
+		content := "[{\"msgstr\":\"Hallo\",\"msgstr_plural\":[]}]"
+		if requests > 1 {
+			content = "[{\"msgstr\":\"Hallo\",\"msgstr_plural\":[]},{\"msgstr\":\"Tsch\\u00fcss\",\"msgstr_plural\":[]}]"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": content}}},
+		}))
+	}))
+	defer server.Close()
+
+	clearProviderEnv(t)
+	t.Setenv("OPENROUTER_API_KEY", "test-key")
+
+	provider, err := NewProvider(context.Background(), Config{
+		Model:      "anthropic/claude-sonnet-4.5",
+		BaseURL:    server.URL,
+		MaxRetries: 3,
+		RetryDelay: time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	messages := []po.Message{{MsgId: "Hello"}, {MsgId: "Goodbye"}}
+	results, err := provider.Translate(context.Background(), messages, "English", "de", 2)
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	assert.Equal(t, "Hallo", results[0].MsgStr)
+	assert.Equal(t, "Tschüss", results[1].MsgStr)
+	assert.Equal(t, 2, requests, "expected the short answer to be retried")
+}
+
+func TestOpenAICompatibleProviderGivesUpAfterMaxRetries(t *testing.T) {
+	var requests int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		content := "[]"
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": content}}},
+		}))
+	}))
+	defer server.Close()
+
+	clearProviderEnv(t)
+	t.Setenv("OPENROUTER_API_KEY", "test-key")
+
+	provider, err := NewProvider(context.Background(), Config{
+		Model:      "anthropic/claude-sonnet-4.5",
+		BaseURL:    server.URL,
+		MaxRetries: 3,
+		RetryDelay: time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	start := time.Now()
+	_, err = provider.Translate(context.Background(), []po.Message{{MsgId: "Hello"}}, "English", "de", 2)
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mismatch between requested (1) and received (0)")
+	assert.Equal(t, 3, requests, "expected every attempt to be used")
+	// The last failure returns straight away instead of sleeping first.
+	assert.Less(t, elapsed, 100*time.Millisecond)
+}

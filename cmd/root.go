@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -17,6 +18,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/chai2010/gettext-go/po"
 	"github.com/joho/godotenv"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
@@ -69,7 +71,7 @@ func init() {
 	rootCmd.Flags().StringVar(&apiKey, "api-key", "", "API key for the provider (optional, overrides the provider's env var)")
 	rootCmd.Flags().StringVar(&baseURL, "base-url", "", "Base URL for the provider API (optional, overrides LLM_BASE_URL)")
 	rootCmd.Flags().Float32Var(&temperature, "temperature", 0.3, "Temperature for AI generation")
-	rootCmd.Flags().IntVar(&maxRetries, "max-retries", 3, "Max retries for failed API calls")
+	rootCmd.Flags().IntVar(&maxRetries, "max-retries", 3, "Max attempts per chunk, covering both failed API calls and unusable responses")
 	rootCmd.Flags().DurationVar(&retryDelay, "retry-delay", 2*time.Second, "Base delay before retrying a failed API call, doubling each attempt")
 	rootCmd.Flags().IntVar(&chunkSize, "chunk-size", 50, "Number of entries to translate per AI request")
 	rootCmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "Process files but do not write any changes")
@@ -355,6 +357,18 @@ func getNPlurals(header po.Header) int {
 	return 2 // Default if parsing fails
 }
 
+// translationJob pairs an untranslated message with its position in the file.
+type translationJob struct {
+	Index int
+	Msg   po.Message
+}
+
+// maxChunkSplits caps how far a failing chunk is halved. Models drop entries
+// more often on long chunks, so retrying a failed 50 as two 25s often works,
+// but splitting all the way down to single entries costs far more requests
+// than the last few stragglers are worth.
+const maxChunkSplits = 2
+
 func translateFile(ctx context.Context, provider translator.Provider, path string, chunkSize int) (int64, error) {
 	fileLog := log.With().Str("file", path).Logger()
 	fileLog.Info().Msg("Translating file")
@@ -364,14 +378,10 @@ func translateFile(ctx context.Context, provider translator.Provider, path strin
 		return 0, fmt.Errorf("failed to load po file for translation: %w", err)
 	}
 
-	type job struct {
-		Index int
-		Msg   po.Message
-	}
-	var untranslatedJobs []job
+	var untranslatedJobs []translationJob
 	for i, msg := range poFile.Messages {
 		if !isMessageTranslated(msg) {
-			untranslatedJobs = append(untranslatedJobs, job{Index: i, Msg: msg})
+			untranslatedJobs = append(untranslatedJobs, translationJob{Index: i, Msg: msg})
 		}
 	}
 
@@ -390,38 +400,91 @@ func translateFile(ctx context.Context, provider translator.Provider, path strin
 	}
 
 	var totalTranslated int64
+	var failedChunks, totalChunks int
+
 	for i := 0; i < len(untranslatedJobs); i += chunkSize {
 		end := i + chunkSize
 		if end > len(untranslatedJobs) {
 			end = len(untranslatedJobs)
 		}
-		jobChunk := untranslatedJobs[i:end]
-
-		msgChunk := make([]po.Message, len(jobChunk))
-		for i, j := range jobChunk {
-			msgChunk[i] = j.Msg
-		}
+		totalChunks++
 
 		nplurals := getNPlurals(poFile.MimeHeader)
-		translations, err := translator.TranslateChunk(ctx, provider, msgChunk, path, nplurals)
-		if err != nil {
-			return totalTranslated, fmt.Errorf("translation error in chunk %d-%d: %w", i+1, end, err)
+		translated, err := translateJobs(ctx, provider, poFile, untranslatedJobs[i:end], path, nplurals, 0, &fileLog)
+		totalTranslated += translated
+
+		// Whatever the chunk did manage is worth keeping, so save before
+		// deciding what to do about the error.
+		if translated > 0 {
+			if saveErr := savePoFile(poFile, path); saveErr != nil {
+				return totalTranslated, fmt.Errorf("failed to save progress after chunk %d-%d: %w", i+1, end, saveErr)
+			}
 		}
 
+		if err != nil {
+			// One bad chunk should not cost the file its remaining chunks; the
+			// entries it missed are still untranslated, so a later run picks
+			// them up on their own.
+			failedChunks++
+			fileLog.Error().Err(err).Int("chunk_start", i+1).Int("chunk_end", end).Msg("Chunk failed, moving on to the next one")
+			if strict {
+				return totalTranslated, fmt.Errorf("translation error in chunk %d-%d: %w", i+1, end, err)
+			}
+		}
+	}
+
+	if failedChunks > 0 {
+		return totalTranslated, fmt.Errorf("%d of %d chunks failed", failedChunks, totalChunks)
+	}
+	return totalTranslated, nil
+}
+
+// translateJobs translates one chunk and writes the results into poFile. When
+// the whole chunk comes back unusable it is halved and the halves are tried
+// separately, up to maxChunkSplits deep. The smaller size applies only to this
+// chunk; the rest of the file continues at the configured chunk size.
+func translateJobs(ctx context.Context, provider translator.Provider, poFile *po.File, jobs []translationJob, path string, nplurals, depth int, fileLog *zerolog.Logger) (int64, error) {
+	msgChunk := make([]po.Message, len(jobs))
+	for i, j := range jobs {
+		msgChunk[i] = j.Msg
+	}
+
+	translations, err := translator.TranslateChunk(ctx, provider, msgChunk, path, nplurals)
+	if err == nil {
 		for j, translation := range translations {
-			originalIndex := jobChunk[j].Index
+			originalIndex := jobs[j].Index
 			poFile.Messages[originalIndex].MsgStr = translation.MsgStr
 			if len(translation.PluralStr) > 0 {
 				poFile.Messages[originalIndex].MsgStrPlural = translation.PluralStr
 			}
 		}
-		totalTranslated += int64(len(translations))
-
-		if err := savePoFile(poFile, path); err != nil {
-			return totalTranslated, fmt.Errorf("failed to save progress after chunk %d-%d: %w", i+1, end, err)
-		}
+		return int64(len(translations)), nil
 	}
-	return totalTranslated, nil
+
+	// Only a bad answer is worth asking again for in smaller pieces. A refused
+	// key or an unreachable endpoint fails the same way however little is sent.
+	if !errors.Is(err, translator.ErrUnusableResponse) || depth >= maxChunkSplits || len(jobs) < 2 {
+		return 0, err
+	}
+
+	half := len(jobs) / 2
+	fileLog.Warn().Err(err).Int("entries", len(jobs)).Int("halves", half).Msg("Chunk came back unusable, retrying it in halves")
+
+	var translated int64
+	firstCount, firstErr := translateJobs(ctx, provider, poFile, jobs[:half], path, nplurals, depth+1, fileLog)
+	translated += firstCount
+	secondCount, secondErr := translateJobs(ctx, provider, poFile, jobs[half:], path, nplurals, depth+1, fileLog)
+	translated += secondCount
+
+	switch {
+	case firstErr != nil && secondErr != nil:
+		return translated, fmt.Errorf("both halves failed: %w", firstErr)
+	case firstErr != nil:
+		return translated, fmt.Errorf("first half failed: %w", firstErr)
+	case secondErr != nil:
+		return translated, fmt.Errorf("second half failed: %w", secondErr)
+	}
+	return translated, nil
 }
 
 func logSummary(fileCount int, translationCount, errorCount int64, start time.Time) {
