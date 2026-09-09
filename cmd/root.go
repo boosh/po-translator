@@ -64,13 +64,13 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&logFile, "log-file", "", "Path to log file for output")
 	rootCmd.PersistentFlags().BoolVar(&strict, "strict", false, "Exit immediately on any error")
 
-	rootCmd.Flags().StringVar(&provider, "provider", "digitalocean", "AI provider: digitalocean, google")
-	rootCmd.Flags().StringVar(&model, "model", "", "Model name to use for translation (defaults to "+translator.DefaultDigitalOceanModel+" for the digitalocean provider, required otherwise)")
-	rootCmd.Flags().StringVar(&apiKey, "api-key", "", "API key (optional, overrides env vars)")
-	rootCmd.Flags().StringVar(&baseURL, "base-url", "", "Base URL for the provider API (optional, digitalocean defaults to "+translator.DefaultDigitalOceanBaseURL+")")
+	rootCmd.Flags().StringVar(&provider, "provider", "", "AI provider to use: "+strings.Join(translator.ProviderNames(), ", ")+" (overrides LLM_PROVIDER; only needed when several providers have credentials set)")
+	rootCmd.Flags().StringVar(&model, "model", "", "Model name, or OpenRouter preset, to use for translation (overrides LLM_MODEL; one of the two is required)")
+	rootCmd.Flags().StringVar(&apiKey, "api-key", "", "API key for the provider (optional, overrides the provider's env var)")
+	rootCmd.Flags().StringVar(&baseURL, "base-url", "", "Base URL for the provider API (optional, overrides LLM_BASE_URL)")
 	rootCmd.Flags().Float32Var(&temperature, "temperature", 0.3, "Temperature for AI generation")
 	rootCmd.Flags().IntVar(&maxRetries, "max-retries", 3, "Max retries for failed API calls")
-	rootCmd.Flags().DurationVar(&retryDelay, "retry-delay", 2*time.Second, "Delay between retries")
+	rootCmd.Flags().DurationVar(&retryDelay, "retry-delay", 2*time.Second, "Base delay before retrying a failed API call, doubling each attempt")
 	rootCmd.Flags().IntVar(&chunkSize, "chunk-size", 50, "Number of entries to translate per AI request")
 	rootCmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "Process files but do not write any changes")
 	rootCmd.Flags().BoolVar(&dedupe, "dedupe", false, "Deduplicate entries with the same msgid and msgstr")
@@ -136,6 +136,14 @@ func run(cmd *cobra.Command, args []string) {
 		return
 	}
 
+	// The provider is set up before the prompt, so that a missing key or model
+	// is reported before the work is approved rather than after, and so the
+	// summary can name what the translation will run on.
+	aiProvider, err := initProvider(ctx)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to initialize AI provider")
+	}
+
 	totalUntranslated := 0
 	for _, msgs := range untranslatedFileMessages {
 		totalUntranslated += len(msgs)
@@ -158,6 +166,7 @@ func run(cmd *cobra.Command, args []string) {
 			}
 		}
 		fmt.Printf("\nTotal: %d untranslated entries across %d file(s).\n", totalUntranslated, len(filesToTranslate))
+		fmt.Printf("Translating with %s, model %s.\n", aiProvider.String(), model)
 		fmt.Print("Proceed with translation? (y/N): ")
 
 		reader := bufio.NewReader(os.Stdin)
@@ -171,10 +180,6 @@ func run(cmd *cobra.Command, args []string) {
 
 	// --- Pass 2: Translate files that need it ---
 	log.Info().Msg("--- Starting translation pass ---")
-	aiProvider, err := initProvider(ctx)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to initialize AI provider")
-	}
 
 	var wg sync.WaitGroup
 	var totalTranslations int64
@@ -216,15 +221,18 @@ func findFiles(patterns []string) ([]string, error) {
 	return allFiles, nil
 }
 
+// initProvider builds the AI provider. Its flags all fall back to environment
+// variables; leaving the provider unset lets translator.NewProvider infer it
+// from whichever API key is present.
 func initProvider(ctx context.Context) (translator.Provider, error) {
 	if provider == "" {
-		return nil, fmt.Errorf("error: --provider is required unless --no-translate is set")
-	}
-	if model == "" && provider == "digitalocean" {
-		model = translator.DefaultDigitalOceanModel
+		provider = os.Getenv("LLM_PROVIDER")
 	}
 	if model == "" {
-		return nil, fmt.Errorf("error: --model is required unless --no-translate is set")
+		model = os.Getenv("LLM_MODEL")
+	}
+	if baseURL == "" {
+		baseURL = os.Getenv("LLM_BASE_URL")
 	}
 
 	providerConfig := translator.Config{
@@ -234,13 +242,14 @@ func initProvider(ctx context.Context) (translator.Provider, error) {
 		BaseURL:     baseURL,
 		Temperature: temperature,
 		MaxRetries:  maxRetries,
+		RetryDelay:  retryDelay,
 		LogPrompt:   logPrompt,
 	}
 	p, err := newProvider(ctx, providerConfig)
 	if err != nil {
 		return nil, err
 	}
-	log.Info().Str("provider", provider).Str("model", model).Msg("Initialized AI provider")
+	log.Info().Str("provider", p.String()).Str("model", model).Msg("Initialized AI provider")
 	return p, nil
 }
 

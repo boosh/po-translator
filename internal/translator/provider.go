@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/chai2010/gettext-go/po"
 )
@@ -31,7 +32,21 @@ type Config struct {
 	BaseURL     string
 	Temperature float32
 	MaxRetries  int
+	RetryDelay  time.Duration
 	LogPrompt   bool
+}
+
+// defaultRetryDelay is the backoff base used when a Config leaves RetryDelay
+// unset, so a zero value still retries at the rate it always has.
+const defaultRetryDelay = 2 * time.Second
+
+// retryBackoff returns how long to wait after the given zero-based attempt,
+// doubling the configured delay each time.
+func retryBackoff(delay time.Duration, attempt int) time.Duration {
+	if delay <= 0 {
+		delay = defaultRetryDelay
+	}
+	return delay * time.Duration(1<<attempt)
 }
 
 // promptEntry is a struct used for marshalling message data for the prompt.

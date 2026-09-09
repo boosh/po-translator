@@ -11,8 +11,8 @@ build: test
 install: test
     go install .
 
-# Run the translator against glob patterns (builds first). Translation runs on DeepSeek
-# via DIGITALOCEAN_MODEL_ACCESS_KEY; pass --provider google --model <name> for Gemini.
+# Run the translator against glob patterns (builds first). The provider comes from
+# whichever API key is set in .env; the model comes from LLM_MODEL or --model.
 # e.g. just run --fix --dedupe --revert-if-unchanged '*/locale/**/django.po'
 run *ARGS: build
     ./{{binary}} {{ARGS}}

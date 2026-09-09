@@ -3,6 +3,7 @@ package translator
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chai2010/gettext-go/po"
 	"github.com/stretchr/testify/assert"
@@ -68,4 +69,14 @@ func TestParseTranslationResults(t *testing.T) {
 			assert.Equal(t, []string{"%d fichier", "%d fichiers"}, results[1].PluralStr)
 		})
 	}
+}
+
+func TestRetryBackoff(t *testing.T) {
+	// The delay doubles per attempt, and an unset delay keeps the historical rate.
+	assert.Equal(t, 100*time.Millisecond, retryBackoff(100*time.Millisecond, 0))
+	assert.Equal(t, 200*time.Millisecond, retryBackoff(100*time.Millisecond, 1))
+	assert.Equal(t, 400*time.Millisecond, retryBackoff(100*time.Millisecond, 2))
+
+	assert.Equal(t, defaultRetryDelay, retryBackoff(0, 0))
+	assert.Equal(t, 2*defaultRetryDelay, retryBackoff(-time.Second, 1))
 }

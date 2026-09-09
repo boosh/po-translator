@@ -3,7 +3,6 @@ package translator
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/chai2010/gettext-go/po"
@@ -18,20 +17,15 @@ type GoogleProvider struct {
 	config Config
 }
 
-// NewGoogleProvider creates a new instance of the Google provider.
-func NewGoogleProvider(ctx context.Context, config Config) (*GoogleProvider, error) {
-	apiKey := config.APIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("GOOGLE_API_KEY")
-	}
-	if apiKey == "" {
-		apiKey = os.Getenv("GEMINI_API_KEY")
-	}
-	if apiKey == "" {
-		return nil, fmt.Errorf("Google API key not provided or found in GOOGLE_API_KEY/GEMINI_API_KEY env vars")
+// NewGoogleProvider creates a new instance of the Google provider. The API key
+// is filled in by the provider registry, so nothing is read from the
+// environment here.
+func NewGoogleProvider(ctx context.Context, config Config) (Provider, error) {
+	if config.APIKey == "" {
+		return nil, fmt.Errorf("no API key provided for google")
 	}
 
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	client, err := genai.NewClient(ctx, option.WithAPIKey(config.APIKey))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Google GenAI client: %w", err)
 	}
@@ -70,7 +64,7 @@ func (p *GoogleProvider) Translate(ctx context.Context, messages []po.Message, s
 			Int("attempt", i+1).
 			Int("max_retries", p.config.MaxRetries).
 			Msg("Google API call failed, retrying...")
-		time.Sleep(2 * time.Second * time.Duration(1<<(i))) // Exponential backoff
+		time.Sleep(retryBackoff(p.config.RetryDelay, i)) // Exponential backoff
 	}
 
 	if err != nil {

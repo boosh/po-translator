@@ -52,12 +52,16 @@ A Go CLI tool that manages Django/gettext `.po` file translations using AI servi
 ## Quick Start
 
 1.  **Set up your environment:**
-    Create a `.env` file in the project root and add your API key. The default provider is DeepSeek on DigitalOcean:
+    Copy `.env.example` to `.env`, then set one API key and the model to use:
     ```
     # .env
-    DIGITALOCEAN_MODEL_ACCESS_KEY=your_digitalocean_model_access_key_here
+    OPENROUTER_API_KEY=your_openrouter_api_key_here
+    LLM_MODEL=anthropic/claude-sonnet-4.5
     ```
-    For Google Gemini, set `GOOGLE_API_KEY` instead. Alternatively, you can use the `--api-key` flag.
+    The provider is chosen by whichever key is set: `OPENROUTER_API_KEY`,
+    `DIGITALOCEAN_MODEL_ACCESS_KEY`, or `GOOGLE_API_KEY`. If your environment carries keys for several of them, name the
+    one to use with `LLM_PROVIDER`
+    or `--provider`.
 
 2.  **Run a full cleanup and translation:**
     This is the recommended command for a typical Django project. It finds all `django.po` files, fixes common issues, removes duplicates, translates new entries, and reverts files that had no translation changes. It's designed to be run frequently.
@@ -66,8 +70,7 @@ A Go CLI tool that manages Django/gettext `.po` file translations using AI servi
     ./po-translator --fix --dedupe --revert-if-unchanged '*/locale/**/django.po'
     ```
 
-    This uses the default provider and model. To use Google Gemini instead, add
-    `--provider google --model gemini-flash-latest`.
+    This uses the key and model from your `.env`. To override the model for a single run, add `--model <name>`.
 
 3.  **Perform a dry run:**
     To see what the tool *would* do without making any changes, use the `--dry-run` or `-n` flag.
@@ -116,51 +119,77 @@ po-translator [flags] <glob-pattern...>
 
 ### Flags
 
-| Flag                    | Type       | Default        | Description                                                                                               |
-|-------------------------|------------|----------------|-----------------------------------------------------------------------------------------------------------|
-| **Translation**         |            |                |                                                                                                           |
-| `--provider`            | `string`   | `digitalocean` | AI provider to use: `digitalocean`, `google`.                                                             |
-| `--model`               | `string`   |                | Model name to use. Defaults to `deepseek-v4-flash-0731` for `digitalocean`; required for other providers. |
-| `--api-key`             | `string`   |                | API key for the provider. Overrides environment variables.                                                |
-| `--base-url`            | `string`   |                | Base URL for the provider API. Overrides environment variables.                                           |
-| `--no-translate`        | `bool`     | `false`        | Disable translation and only perform cleanup operations.                                                  |
-| `--max-translations`    | `int`      | `0`            | Max number of entries to translate per file (0 for no limit).                                             |
-| **Cleanup**             |            |                |                                                                                                           |
-| `--fix`                 | `bool`     | `false`        | Fix unescaped percent signs (`%` -> `%%`).                                                                |
-| `--dedupe`              | `bool`     | `false`        | Remove duplicate entries with the same `msgid`.                                                           |
-| `--revert-if-unchanged` | `bool`     | `false`        | Revert file to `git HEAD` if no new translations were made.                                               |
-| **Behavior**            |            |                |                                                                                                           |
-| `--dry-run`, `-n`       | `bool`     | `false`        | Process files but do not write any changes.                                                               |
-| `--yes`, `-y`           | `bool`     | `false`        | Automatically answer "yes" to all prompts and skip confirmation.                                          |
-| `--strict`              | `bool`     | `false`        | Exit immediately on any error.                                                                            |
-| `--chunk-size`          | `int`      | `50`           | Number of entries to translate per AI request.                                                            |
-| `--max-retries`         | `int`      | `3`            | Max retries for failed API calls.                                                                         |
-| `--retry-delay`         | `duration` | `2s`           | Delay between retries (e.g., `2s`, `500ms`).                                                              |
-| `--temperature`         | `float`    | `0.3`          | Temperature for AI generation (0.0 to 1.0).                                                               |
-| **Logging**             |            |                |                                                                                                           |
-| `--log-level`           | `string`   | `info`         | Log level (`debug`, `info`, `warn`, `error`).                                                             |
-| `--log-file`            | `string`   |                | Path to log file for output. Defaults to stderr.                                                          |
-| `--log-prompt`          | `bool`     | `false`        | Log the full prompt sent to the AI provider (for debugging).                                              |
+| Flag                    | Type       | Default | Description                                                                                                                             |
+|-------------------------|------------|---------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| **Translation**         |            |         |                                                                                                                                         |
+| `--provider`            | `string`   |         | AI provider: `openrouter`, `digitalocean`, `google`. Overrides `LLM_PROVIDER`. Only needed when several providers have credentials set. |
+| `--model`               | `string`   |         | Model name, or OpenRouter preset, to translate with. Overrides `LLM_MODEL`; one of the two is required.                                 |
+| `--api-key`             | `string`   |         | API key for the provider. Overrides the provider's environment variable.                                                                |
+| `--base-url`            | `string`   |         | Base URL for the provider API. Overrides `LLM_BASE_URL` and the provider default.                                                       |
+| `--no-translate`        | `bool`     | `false` | Disable translation and only perform cleanup operations.                                                                                |
+| `--max-translations`    | `int`      | `0`     | Max number of entries to translate per file (0 for no limit).                                                                           |
+| **Cleanup**             |            |         |                                                                                                                                         |
+| `--fix`                 | `bool`     | `false` | Fix unescaped percent signs (`%` -> `%%`).                                                                                              |
+| `--dedupe`              | `bool`     | `false` | Remove duplicate entries with the same `msgid`.                                                                                         |
+| `--revert-if-unchanged` | `bool`     | `false` | Revert file to `git HEAD` if no new translations were made.                                                                             |
+| **Behavior**            |            |         |                                                                                                                                         |
+| `--dry-run`, `-n`       | `bool`     | `false` | Process files but do not write any changes.                                                                                             |
+| `--yes`, `-y`           | `bool`     | `false` | Automatically answer "yes" to all prompts and skip confirmation.                                                                        |
+| `--strict`              | `bool`     | `false` | Exit immediately on any error.                                                                                                          |
+| `--chunk-size`          | `int`      | `50`    | Number of entries to translate per AI request.                                                                                          |
+| `--max-retries`         | `int`      | `3`     | Max retries for failed API calls.                                                                                                       |
+| `--retry-delay`         | `duration` | `2s`    | Base delay before retrying a failed API call, doubling each attempt (e.g., `2s`, `500ms`).                                              |
+| `--temperature`         | `float`    | `0.3`   | Temperature for AI generation (0.0 to 1.0).                                                                                             |
+| **Logging**             |            |         |                                                                                                                                         |
+| `--log-level`           | `string`   | `info`  | Log level (`debug`, `info`, `warn`, `error`).                                                                                           |
+| `--log-file`            | `string`   |         | Path to log file for output. Defaults to stderr.                                                                                        |
+| `--log-prompt`          | `bool`     | `false` | Log the full prompt sent to the AI provider (for debugging).                                                                            |
 
 ## AI Provider Setup
 
+The provider is whichever one has credentials in the environment. That is usually unambiguous, so nothing needs to be
+selected. When the environment carries keys for several providers, name the one to use with `LLM_PROVIDER` or
+`--provider`; the tool asks for a name rather than guessing. Naming a provider whose key is absent is an error.
+
+The model is set once, with `LLM_MODEL` or `--model`, and applies to whichever provider is in use. There is no built-in
+default model, because models are released and retired far more often than this tool is released. Use whatever name the
+provider expects.
+
+The endpoint defaults to the provider's own and can be overridden with `LLM_BASE_URL` or
+`--base-url`.
+
+The key normally comes from the environment, which is also what selects the provider. `--api-key`
+overrides it. Because a bare key says nothing about which provider it belongs to, pair it with
+`--provider` unless the environment already points at one:
+
+```bash
+po-translator -y --provider openrouter --api-key "$OPENROUTER_KEY" --model deepseek/deepseek-chat 'locale/**/*.po'
+```
+
+### OpenRouter
+
+- **Provider Name:** `openrouter`
+- **Environment Variable:** `OPENROUTER_API_KEY`
+- **Models:** any model OpenRouter serves, e.g. `anthropic/claude-sonnet-4.5`, `openai/gpt-5`,
+  `deepseek/deepseek-chat`.
+- **Presets:** an [OpenRouter preset](https://openrouter.ai/docs/features/presets) goes in the same setting. Use
+  `LLM_MODEL="@preset/your-preset"` to take the model and parameters from the preset, or
+  `LLM_MODEL="anthropic/claude-sonnet-4.5@preset/your-preset"` to pin a model and apply the preset's parameters to it.
+- **Endpoint:** `https://openrouter.ai/api/v1`
+
 ### DeepSeek on DigitalOcean
 
-- **Provider Name:** `digitalocean` (the default)
+- **Provider Name:** `digitalocean`
 - **Environment Variable:** `DIGITALOCEAN_MODEL_ACCESS_KEY`
-- **Models:** `deepseek-v4-flash-0731` (the default), or any other model served by the endpoint.
-- **Endpoint:** DigitalOcean's OpenAI-compatible serverless inference API at `https://inference.do-ai.run/v1`. Override
-  it with `DIGITALOCEAN_INFERENCE_BASE_URL` or `--base-url`.
+- **Models:** `deepseek-v4-flash-0731`, or any other model served by the endpoint.
+- **Endpoint:** DigitalOcean's OpenAI-compatible serverless inference API at
+  `https://inference.do-ai.run/v1`.
 
 ### Google Gemini
 -   **Provider Name:** `google`
 -   **Environment Variable:** `GOOGLE_API_KEY` or `GEMINI_API_KEY`
 -   **Models:** `gemini-flash-latest`, `gemini-2.5-pro`, etc.
-
-### Anthropic Claude
--   _(Currently stubbed out and disabled)_
--   **Provider Name:** `anthropic`
--   **Environment Variable:** `ANTHROPIC_API_KEY`
+- **Endpoint:** fixed by the Google SDK; `--base-url` does not apply.
 
 ## Development
 

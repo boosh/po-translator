@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chai2010/gettext-go/po"
 	"github.com/stretchr/testify/assert"
@@ -538,11 +539,9 @@ msgstr ""
 
 	// Set the global flags for this test case
 	yes = true
-	provider = "google" // Mock provider will be injected, but flag needs to be set
-	model = "gemini-pro"
+	model = "gemini-pro" // The mock provider is injected, but the flag still needs a value
 	defer func() {
 		yes = false
-		provider = ""
 		model = ""
 	}()
 
@@ -754,4 +753,66 @@ func TestSortMessages(t *testing.T) {
 		changed = sortMessages(singleItemPoFile)
 		assert.False(t, changed, "sortMessages should not report changes for a single-item slice")
 	})
+}
+
+// captureProviderConfig runs initProvider with the factory mocked out and
+// returns the config it was handed.
+func captureProviderConfig(t *testing.T) translator.Config {
+	t.Helper()
+
+	var gotConfig translator.Config
+	originalNewProvider := newProvider
+	newProvider = func(ctx context.Context, config translator.Config) (translator.Provider, error) {
+		gotConfig = config
+		return &mockProvider{}, nil
+	}
+	defer func() { newProvider = originalNewProvider }()
+
+	_, err := initProvider(context.Background())
+	require.NoError(t, err)
+	return gotConfig
+}
+
+func TestInitProviderPassesRetryDelay(t *testing.T) {
+	// The flag is only useful if it reaches the provider config.
+	model = "test-model"
+	retryDelay = 750 * time.Millisecond
+	maxRetries = 5
+	defer func() {
+		model = ""
+		retryDelay = 2 * time.Second
+		maxRetries = 3
+	}()
+
+	gotConfig := captureProviderConfig(t)
+	assert.Equal(t, 750*time.Millisecond, gotConfig.RetryDelay)
+	assert.Equal(t, 5, gotConfig.MaxRetries)
+}
+
+func TestInitProviderResolvesProviderAndModel(t *testing.T) {
+	t.Setenv("LLM_PROVIDER", "google")
+	t.Setenv("LLM_MODEL", "gemini-flash-latest")
+	t.Setenv("LLM_BASE_URL", "https://example.invalid/v1")
+	defer func() {
+		provider = ""
+		model = ""
+		baseURL = ""
+		apiKey = ""
+	}()
+
+	// With the flags empty, the environment supplies all three.
+	provider, model, baseURL, apiKey = "", "", "", ""
+	gotConfig := captureProviderConfig(t)
+	assert.Equal(t, "google", gotConfig.Provider)
+	assert.Equal(t, "gemini-flash-latest", gotConfig.Model)
+	assert.Equal(t, "https://example.invalid/v1", gotConfig.BaseURL)
+	assert.Empty(t, gotConfig.APIKey)
+
+	// The flags win over the environment.
+	provider, model, baseURL, apiKey = "openrouter", "anthropic/claude-sonnet-4.5", "https://flag.invalid/v1", "flag-key"
+	gotConfig = captureProviderConfig(t)
+	assert.Equal(t, "openrouter", gotConfig.Provider)
+	assert.Equal(t, "anthropic/claude-sonnet-4.5", gotConfig.Model)
+	assert.Equal(t, "https://flag.invalid/v1", gotConfig.BaseURL)
+	assert.Equal(t, "flag-key", gotConfig.APIKey)
 }
