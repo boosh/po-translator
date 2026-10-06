@@ -76,10 +76,10 @@ func init() {
 	rootCmd.Flags().IntVar(&chunkSize, "chunk-size", 50, "Number of entries to translate per AI request")
 	rootCmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "Process files but do not write any changes")
 	rootCmd.Flags().BoolVar(&dedupe, "dedupe", false, "Deduplicate entries with the same msgid and msgstr")
-	rootCmd.Flags().BoolVar(&fix, "fix", false, "Fix unescaped percent signs in msgid and msgstr")
+	rootCmd.Flags().BoolVar(&fix, "fix", false, "Make percent signs in msgstr follow the msgid's escaping, including in new translations")
 	rootCmd.Flags().IntVar(&maxTranslations, "max-translations", 0, "Max number of entries to translate per file (0 for no limit)")
 	rootCmd.Flags().BoolVar(&noTranslate, "no-translate", false, "Disable translation and only perform other operations (e.g., --fix, --dedupe)")
-	rootCmd.Flags().BoolVar(&revertIfUnchanged, "revert-if-unchanged", false, "Revert .po file to its git HEAD version if no new translations were made")
+	rootCmd.Flags().BoolVar(&revertIfUnchanged, "revert-if-unchanged", false, "Revert .po file to its git HEAD version if it needs no translations and its entries match HEAD")
 	rootCmd.Flags().BoolVarP(&yes, "yes", "y", false, "Automatically answer yes to all prompts and skip confirmation")
 	rootCmd.Flags().BoolVar(&logPrompt, "log-prompt", false, "Log the full prompt sent to the AI provider (for debugging)")
 }
@@ -286,6 +286,10 @@ func preprocessFile(path string) ([]po.Message, error) {
 		fileLog.Info().Int("count", count).Msg("Cleared fuzzy entries")
 		madeChanges = true
 	}
+	if count, changed := clearInvalidTranslations(poFile, &fileLog); changed {
+		fileLog.Info().Int("count", count).Msg("Cleared translations whose placeholders don't match their msgid")
+		madeChanges = true
+	}
 	if changed := sortMessages(poFile); changed {
 		fileLog.Info().Msg("Reordered messages by msgid")
 		madeChanges = true
@@ -302,34 +306,84 @@ func preprocessFile(path string) ([]po.Message, error) {
 		poFile = reloadedPoFile
 	}
 
+	nplurals := getNPlurals(poFile.MimeHeader)
 	var untranslated []po.Message
 	for _, msg := range poFile.Messages {
-		if !isMessageTranslated(msg) {
+		if !isMessageTranslated(msg, nplurals) {
 			untranslated = append(untranslated, msg)
 		}
 	}
 
-	if len(untranslated) == 0 && revertIfUnchanged {
-		err := git.RevertFile(path)
-		if err == nil {
-			fileLog.Info().Msg("Reverted file to git HEAD version to avoid spurious commit")
-			return nil, nil
+	if len(untranslated) == 0 && revertIfUnchanged && !dryRun {
+		// Reverting is only meant to drop header churn such as a new
+		// POT-Creation-Date. Entries that differ from HEAD (removed strings,
+		// kept fuzzy translations, uncommitted edits) would be lost by it.
+		unchanged, err := entriesMatchHead(poFile, path)
+		switch {
+		case err != nil:
+			fileLog.Warn().Err(err).Msg("Could not compare file with git HEAD, saving cleaned-up version instead")
+		case !unchanged:
+			fileLog.Info().Msg("Entries differ from git HEAD, keeping file")
+		default:
+			if err := git.RevertFile(path); err != nil {
+				fileLog.Warn().Err(err).Msg("Could not revert file to git HEAD, saving cleaned-up version instead")
+			} else {
+				fileLog.Info().Msg("Reverted file to git HEAD version to avoid spurious commit")
+				return nil, nil
+			}
 		}
-		fileLog.Warn().Err(err).Msg("Could not revert file to git HEAD, saving cleaned-up version instead")
 	}
 
 	return untranslated, nil
 }
 
-func isMessageTranslated(msg po.Message) bool {
+// entriesMatchHead reports whether poFile has the same entries as path's git
+// HEAD version, ignoring the header, entry order and comments, none of which
+// change what is displayed.
+func entriesMatchHead(poFile *po.File, path string) (bool, error) {
+	head, err := git.HeadContent(path)
+	if err != nil {
+		return false, err
+	}
+	headFile, err := po.Load(head)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse git HEAD version: %w", err)
+	}
+
+	current, committed := renderEntries(poFile), renderEntries(headFile)
+	if len(current) != len(committed) {
+		return false, nil
+	}
+	for i := range current {
+		if current[i] != committed[i] {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// renderEntries renders every entry with only its flags kept from its
+// comments, sorted, so two files can be compared regardless of formatting and
+// order.
+func renderEntries(poFile *po.File) []string {
+	rendered := make([]string, 0, len(poFile.Messages))
+	for _, msg := range poFile.Messages {
+		msg.Comment = po.Comment{Flags: msg.Comment.Flags}
+		rendered = append(rendered, msg.String())
+	}
+	sort.Strings(rendered)
+	return rendered
+}
+
+func isMessageTranslated(msg po.Message, nplurals int) bool {
 	if msg.MsgId == "" {
 		return true // Skip empty msgids
 	}
 	if msg.MsgIdPlural == "" {
 		return msg.MsgStr != "" // Simple case: no plural
 	}
-	if len(msg.MsgStrPlural) == 0 {
-		return false // Plural form exists but no translations
+	if len(msg.MsgStrPlural) < nplurals {
+		return false // Fewer forms than the language needs
 	}
 	for _, s := range msg.MsgStrPlural {
 		if s == "" {
@@ -378,9 +432,10 @@ func translateFile(ctx context.Context, provider translator.Provider, path strin
 		return 0, fmt.Errorf("failed to load po file for translation: %w", err)
 	}
 
+	nplurals := getNPlurals(poFile.MimeHeader)
 	var untranslatedJobs []translationJob
 	for i, msg := range poFile.Messages {
-		if !isMessageTranslated(msg) {
+		if !isMessageTranslated(msg, nplurals) {
 			untranslatedJobs = append(untranslatedJobs, translationJob{Index: i, Msg: msg})
 		}
 	}
@@ -409,7 +464,6 @@ func translateFile(ctx context.Context, provider translator.Provider, path strin
 		}
 		totalChunks++
 
-		nplurals := getNPlurals(poFile.MimeHeader)
 		translated, err := translateJobs(ctx, provider, poFile, untranslatedJobs[i:end], path, nplurals, 0, &fileLog)
 		totalTranslated += translated
 
@@ -451,14 +505,36 @@ func translateJobs(ctx context.Context, provider translator.Provider, poFile *po
 
 	translations, err := translator.TranslateChunk(ctx, provider, msgChunk, path, nplurals)
 	if err == nil {
+		var accepted int64
 		for j, translation := range translations {
-			originalIndex := jobs[j].Index
-			poFile.Messages[originalIndex].MsgStr = translation.MsgStr
-			if len(translation.PluralStr) > 0 {
-				poFile.Messages[originalIndex].MsgStrPlural = translation.PluralStr
+			candidate := jobs[j].Msg
+			if candidate.MsgIdPlural == "" {
+				candidate.MsgStr = translation.MsgStr
+			} else {
+				candidate.MsgStr = ""
+				candidate.MsgStrPlural = translation.PluralStr
 			}
+			if fix {
+				fixMessagePercents(&candidate)
+			}
+
+			// A bad entry is dropped rather than failing the chunk: it stays
+			// untranslated, so the next run asks for it again.
+			if !isMessageTranslated(candidate, nplurals) {
+				fileLog.Warn().Str("msgid", candidate.MsgId).Msg("Discarding translation with missing or empty forms")
+				continue
+			}
+			if err := checkTranslation(candidate, nplurals); err != nil {
+				fileLog.Warn().Err(err).Str("msgid", candidate.MsgId).Msg("Discarding translation with mismatched placeholders")
+				continue
+			}
+
+			originalIndex := jobs[j].Index
+			poFile.Messages[originalIndex].MsgStr = candidate.MsgStr
+			poFile.Messages[originalIndex].MsgStrPlural = candidate.MsgStrPlural
+			accepted++
 		}
-		return int64(len(translations)), nil
+		return accepted, nil
 	}
 
 	// Only a bad answer is worth asking again for in smaller pieces. A refused
@@ -558,19 +634,24 @@ func deduplicateEntries(poFile *po.File) (dedupedCount int, madeChanges bool, er
 			continue
 		}
 
-		// Check for conflicting translations among duplicates
+		// Check for conflicting translations among duplicates, plural forms
+		// included
 		firstMsgStr := ""
-		hasTranslation := false
+		var firstMsgStrPlural []string
+		firstTranslation := ""
 		for _, index := range indices {
-			msgStr := poFile.Messages[index].MsgStr
-			if msgStr != "" {
-				if hasTranslation && msgStr != firstMsgStr {
-					return 0, false, fmt.Errorf("duplicate msgid '%s' (context: '%s') with conflicting msgstr: '%s' vs '%s'",
-						poFile.Messages[indices[0]].MsgId, poFile.Messages[indices[0]].MsgContext, firstMsgStr, msgStr)
-				}
-				firstMsgStr = msgStr
-				hasTranslation = true
+			msg := poFile.Messages[index]
+			translation := translationKey(msg)
+			if translation == "" {
+				continue
 			}
+			if firstTranslation != "" && translation != firstTranslation {
+				return 0, false, fmt.Errorf("duplicate msgid '%s' (context: '%s') with conflicting msgstr: %q vs %q",
+					poFile.Messages[indices[0]].MsgId, poFile.Messages[indices[0]].MsgContext, firstTranslation, translation)
+			}
+			firstTranslation = translation
+			firstMsgStr = msg.MsgStr
+			firstMsgStrPlural = msg.MsgStrPlural
 		}
 
 		// Determine which entry to keep
@@ -595,6 +676,9 @@ func deduplicateEntries(poFile *po.File) (dedupedCount int, madeChanges bool, er
 			}
 		}
 		poFile.Messages[keepIndex].MsgStr = firstMsgStr
+		if firstTranslation != "" {
+			poFile.Messages[keepIndex].MsgStrPlural = firstMsgStrPlural
+		}
 	}
 
 	if len(indicesToRemove) > 0 {
@@ -653,43 +737,236 @@ func appendIfMissing(slice []string, items ...string) []string {
 	return slice
 }
 
+// pythonSpecPattern matches one Python %-conversion at the start of a string,
+// named or positional, with any flags, width and precision.
+var pythonSpecPattern = regexp.MustCompile(`^%(?:\([^)]*\))?[-#0 +]*(?:\*|\d+)?(?:\.(?:\*|\d+))?[diouxXeEfFgGcrsa]`)
+
+// javascriptSpecPattern matches the placeholders Django's JS interpolate()
+// substitutes. It gives no meaning to any other percent sign.
+var javascriptSpecPattern = regexp.MustCompile(`%\(\w+\)s|%s`)
+
+func hasFlag(msg po.Message, flag string) bool {
+	for _, f := range msg.Comment.Flags {
+		if f == flag {
+			return true
+		}
+	}
+	return false
+}
+
+// scanPythonPercents returns s's conversion specs in order and how many of its
+// percent signs are neither a spec nor part of a %% escape.
+func scanPythonPercents(s string) (specs []string, lone int) {
+	for i := 0; i < len(s); {
+		switch {
+		case s[i] != '%':
+			i++
+		case strings.HasPrefix(s[i:], "%%"):
+			i += 2
+		default:
+			if spec := pythonSpecPattern.FindString(s[i:]); spec != "" {
+				specs = append(specs, spec)
+				i += len(spec)
+			} else {
+				lone++
+				i++
+			}
+		}
+	}
+	return specs, lone
+}
+
+// percentsEscaped reports whether msg's strings go through %-formatting, so a
+// literal percent sign must be written %%. That is so for python-format entries
+// and for Django template strings, whose msgids makemessages writes with %%.
+func percentsEscaped(msg po.Message) bool {
+	return hasFlag(msg, "python-format") || strings.Contains(msg.MsgId, "%%") || strings.Contains(msg.MsgIdPlural, "%%")
+}
+
+// escapeLonePercents doubles each percent sign in s that is not a %% escape or
+// one of the msgid's own specs. A named spec the msgid lacks is left alone, so
+// checkTranslation rejects it instead of it being hidden behind an escape.
+func escapeLonePercents(s string, known map[string]bool) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		switch {
+		case s[i] != '%':
+			b.WriteByte(s[i])
+			i++
+		case strings.HasPrefix(s[i:], "%%"):
+			b.WriteString("%%")
+			i += 2
+		default:
+			spec := pythonSpecPattern.FindString(s[i:])
+			if spec != "" && (known[spec] || strings.HasPrefix(spec, "%(")) {
+				b.WriteString(spec)
+				i += len(spec)
+			} else if strings.HasPrefix(s[i:], "%(") {
+				b.WriteByte('%')
+				i++
+			} else {
+				b.WriteString("%%")
+				i++
+			}
+		}
+	}
+	return b.String()
+}
+
+// fixMessagePercents makes the percent signs in msg's translations follow its
+// msgid. Where the msgid is %-formatted, stray percent signs are escaped; where
+// it holds a raw percent sign, %% escapes are undone, since nothing would turn
+// them back into %. The msgid itself is never touched: it is the lookup key and
+// has to match the source string exactly.
+func fixMessagePercents(msg *po.Message) bool {
+	var fixer func(string) string
+	switch {
+	case percentsEscaped(*msg):
+		known := make(map[string]bool)
+		for _, s := range []string{msg.MsgId, msg.MsgIdPlural} {
+			specs, _ := scanPythonPercents(s)
+			for _, spec := range specs {
+				known[spec] = true
+			}
+		}
+		fixer = func(s string) string { return escapeLonePercents(s, known) }
+	case strings.Contains(msg.MsgId, "%") || strings.Contains(msg.MsgIdPlural, "%"):
+		fixer = func(s string) string { return strings.ReplaceAll(s, "%%", "%") }
+	default:
+		return false
+	}
+
+	changed := false
+	if msg.MsgStr != "" {
+		if fixed := fixer(msg.MsgStr); fixed != msg.MsgStr {
+			msg.MsgStr = fixed
+			changed = true
+		}
+	}
+	for i, s := range msg.MsgStrPlural {
+		if fixed := fixer(s); fixed != s {
+			msg.MsgStrPlural[i] = fixed
+			changed = true
+		}
+	}
+	return changed
+}
+
 func fixUnescapedPercents(poFile *po.File) (fixCount int, madeChanges bool) {
-	re := regexp.MustCompile(`%%|%\([^\)]*\)[sdifouxXeEgGcp]|%[sdifouxXeEgGcp]|%`)
-	fixer := func(s string) (string, bool) {
-		stringChanged := false
-		replacer := func(match string) string {
-			if match == "%" {
-				stringChanged = true
-				return "%%"
-			}
-			return match
-		}
-		result := re.ReplaceAllStringFunc(s, replacer)
-		return result, stringChanged
-	}
-	count := 0
 	for i := range poFile.Messages {
-		msgChanged := false
-		if poFile.Messages[i].MsgId != "" {
-			fixedMsgId, idChanged := fixer(poFile.Messages[i].MsgId)
-			if idChanged {
-				poFile.Messages[i].MsgId = fixedMsgId
-				msgChanged = true
-			}
-		}
-		if poFile.Messages[i].MsgStr != "" {
-			fixedMsgStr, strChanged := fixer(poFile.Messages[i].MsgStr)
-			if strChanged {
-				poFile.Messages[i].MsgStr = fixedMsgStr
-				msgChanged = true
-			}
-		}
-		if msgChanged {
-			madeChanges = true
-			count++
+		if fixMessagePercents(&poFile.Messages[i]) {
+			fixCount++
 		}
 	}
-	return count, madeChanges
+	return fixCount, fixCount > 0
+}
+
+// checkTranslation reports a translation of a python-format or
+// javascript-format entry whose placeholders would fail msgfmt or break
+// formatting at runtime: a spec the msgid doesn't have, a stray percent sign
+// in a python-format string, or a spec the msgid needs that is missing. The
+// singular form of a plural may leave out named specs, since languages often
+// spell out "one"; positional specs must always line up. Empty forms are
+// skipped, as completeness is isMessageTranslated's job.
+func checkTranslation(msg po.Message, nplurals int) error {
+	var scan func(string) ([]string, int)
+	switch {
+	case hasFlag(msg, "python-format"):
+		scan = scanPythonPercents
+	case hasFlag(msg, "javascript-format"):
+		scan = func(s string) ([]string, int) { return javascriptSpecPattern.FindAllString(s, -1), 0 }
+	default:
+		return nil
+	}
+
+	idSpecs, _ := scan(msg.MsgId)
+	pluralSpecs, _ := scan(msg.MsgIdPlural)
+	known := make(map[string]bool)
+	for _, spec := range append(append([]string{}, idSpecs...), pluralSpecs...) {
+		known[spec] = true
+	}
+
+	type form struct {
+		label    string
+		text     string
+		source   []string
+		optional bool
+	}
+	var forms []form
+	if msg.MsgIdPlural == "" {
+		forms = append(forms, form{"msgstr", msg.MsgStr, idSpecs, false})
+	} else {
+		for i, s := range msg.MsgStrPlural {
+			source := pluralSpecs
+			if i == 0 && nplurals > 1 {
+				source = idSpecs
+			}
+			forms = append(forms, form{fmt.Sprintf("msgstr[%d]", i), s, source, i == 0 && nplurals > 1})
+		}
+	}
+
+	for _, f := range forms {
+		if f.text == "" {
+			continue
+		}
+		specs, lone := scan(f.text)
+		if lone > 0 {
+			return fmt.Errorf("%s has an unescaped %%", f.label)
+		}
+		present := make(map[string]bool)
+		var positional []string
+		for _, spec := range specs {
+			if !known[spec] {
+				return fmt.Errorf("%s has placeholder %s, which the msgid doesn't", f.label, spec)
+			}
+			present[spec] = true
+			if !strings.HasPrefix(spec, "%(") {
+				positional = append(positional, spec)
+			}
+		}
+
+		var wantPositional []string
+		for _, spec := range f.source {
+			if !strings.HasPrefix(spec, "%(") {
+				wantPositional = append(wantPositional, spec)
+			} else if !present[spec] && !f.optional {
+				return fmt.Errorf("%s is missing placeholder %s", f.label, spec)
+			}
+		}
+		if strings.Join(positional, "\x00") != strings.Join(wantPositional, "\x00") {
+			return fmt.Errorf("%s has positional placeholders %v, want %v", f.label, positional, wantPositional)
+		}
+	}
+	return nil
+}
+
+// clearInvalidTranslations empties translations that checkTranslation rejects,
+// so they are translated again instead of failing msgfmt.
+func clearInvalidTranslations(poFile *po.File, fileLog *zerolog.Logger) (clearedCount int, madeChanges bool) {
+	nplurals := getNPlurals(poFile.MimeHeader)
+	for i := range poFile.Messages {
+		msg := &poFile.Messages[i]
+		err := checkTranslation(*msg, nplurals)
+		if err == nil {
+			continue
+		}
+		fileLog.Warn().Err(err).Str("msgid", msg.MsgId).Msg("Clearing translation with mismatched placeholders")
+		msg.MsgStr = ""
+		for j := range msg.MsgStrPlural {
+			msg.MsgStrPlural[j] = ""
+		}
+		clearedCount++
+	}
+	return clearedCount, clearedCount > 0
+}
+
+// translationKey joins every form of msg's translation into one comparable
+// string, empty when it has none.
+func translationKey(msg po.Message) string {
+	if msg.MsgStr == "" && strings.Join(msg.MsgStrPlural, "") == "" {
+		return ""
+	}
+	return strings.Join(append([]string{msg.MsgStr}, msg.MsgStrPlural...), "\x00")
 }
 
 func sortMessages(poFile *po.File) bool {

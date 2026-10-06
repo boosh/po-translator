@@ -87,3 +87,39 @@ func TestRevertFile(t *testing.T) {
 		assert.Contains(t, err.Error(), "could not revert file")
 	})
 }
+
+func TestHeadContent(t *testing.T) {
+	// Skip test if git is not installed
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found, skipping test")
+	}
+
+	tempDir, cleanup := setupGitRepo(t)
+	defer cleanup()
+
+	runCmd := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tempDir
+		require.NoError(t, cmd.Run())
+	}
+
+	t.Run("returns the committed content, not the working copy", func(t *testing.T) {
+		filePath := filepath.Join(tempDir, "testfile.txt")
+		require.NoError(t, os.WriteFile(filePath, []byte("committed"), 0644))
+		runCmd("add", "testfile.txt")
+		runCmd("commit", "-m", "Initial commit")
+		require.NoError(t, os.WriteFile(filePath, []byte("working copy"), 0644))
+
+		content, err := HeadContent(filePath)
+		require.NoError(t, err)
+		assert.Equal(t, "committed", string(content))
+	})
+
+	t.Run("returns error if file is not in git", func(t *testing.T) {
+		filePath := filepath.Join(tempDir, "untracked.txt")
+		require.NoError(t, os.WriteFile(filePath, []byte("test content"), 0644))
+
+		_, err := HeadContent(filePath)
+		assert.Error(t, err)
+	})
+}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/chai2010/gettext-go/po"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -117,7 +118,7 @@ func TestClearFuzzyEntries(t *testing.T) {
 		assert.NotContains(t, processedMsg.Comment.Flags, "fuzzy", "Fuzzy flag should be removed")
 		assert.Contains(t, processedMsg.Comment.Flags, "python-format", "Other flags should be kept")
 		assert.Equal(t, []string{"", ""}, processedMsg.MsgStrPlural, "Every plural form should be cleared")
-		assert.False(t, isMessageTranslated(processedMsg), "Entry should be queued for translation")
+		assert.False(t, isMessageTranslated(processedMsg, 2), "Entry should be queued for translation")
 	})
 
 	t.Run("clears plural translations even when the previous msgid matches", func(t *testing.T) {
@@ -292,6 +293,33 @@ func TestDeduplicateEntries(t *testing.T) {
 		assert.Error(t, err)
 	})
 
+	t.Run("returns error on different plural translations", func(t *testing.T) {
+		poFile := &po.File{
+			Messages: []po.Message{
+				{MsgId: "%(n)s post", MsgIdPlural: "%(n)s posts", MsgStrPlural: []string{"%(n)s Beitrag", "%(n)s Beiträge"}},
+				{MsgId: "%(n)s post", MsgIdPlural: "%(n)s posts", MsgStrPlural: []string{"%(n)s Tag", "%(n)s Tags"}},
+			},
+		}
+
+		_, _, err := deduplicateEntries(poFile)
+		assert.Error(t, err)
+	})
+
+	t.Run("keeps the plural translation", func(t *testing.T) {
+		poFile := &po.File{
+			Messages: []po.Message{
+				{MsgId: "%(n)s post", MsgIdPlural: "%(n)s posts", MsgStrPlural: []string{"", ""}},
+				{MsgId: "%(n)s post", MsgIdPlural: "%(n)s posts", MsgStrPlural: []string{"%(n)s Beitrag", "%(n)s Beiträge"}},
+			},
+		}
+
+		dedupedCount, _, err := deduplicateEntries(poFile)
+		require.NoError(t, err)
+		assert.Equal(t, 1, dedupedCount)
+		require.Len(t, poFile.Messages, 1)
+		assert.Equal(t, []string{"%(n)s Beitrag", "%(n)s Beiträge"}, poFile.Messages[0].MsgStrPlural)
+	})
+
 	t.Run("handles context correctly", func(t *testing.T) {
 		poFile := &po.File{
 			Messages: []po.Message{
@@ -326,75 +354,86 @@ func TestDeduplicateEntries(t *testing.T) {
 func TestFixUnescapedPercents(t *testing.T) {
 	testCases := []struct {
 		name           string
+		flags []string
 		inputMsgId     string
 		inputMsgStr    string
-		expectedMsgId  string
 		expectedMsgStr string
-		expectedCount  int
 		expectChange   bool
 	}{
 		{
-			name:           "simple case",
+			name:           "raw msgid keeps its literal percent",
 			inputMsgId:     "A 10% discount",
 			inputMsgStr:    "Un descuento del 10%",
-			expectedMsgId:  "A 10%% discount",
-			expectedMsgStr: "Un descuento del 10%%",
-			expectedCount:  1,
+			expectedMsgStr: "Un descuento del 10%",
+			expectChange:   false,
+		},
+		{
+			name:           "raw msgid has escapes undone",
+			inputMsgId:     "Much Shorter (~50%)",
+			inputMsgStr:    "Viel kürzer (~50%%)",
+			expectedMsgStr: "Viel kürzer (~50%)",
 			expectChange:   true,
 		},
 		{
-			name:           "no unescaped percents",
+			name: "no percents",
 			inputMsgId:     "A simple string",
 			inputMsgStr:    "Una cadena simple",
-			expectedMsgId:  "A simple string",
 			expectedMsgStr: "Una cadena simple",
-			expectedCount:  0,
 			expectChange:   false,
+		},
+		{
+			name:           "template msgid with escaped percent",
+			inputMsgId:     "A 10%% discount",
+			inputMsgStr:    "Un descuento del 10%",
+			expectedMsgStr: "Un descuento del 10%%",
+			expectChange:   true,
 		},
 		{
 			name:           "already escaped",
 			inputMsgId:     "A 10%% discount",
 			inputMsgStr:    "Un descuento del 10%%",
-			expectedMsgId:  "A 10%% discount",
 			expectedMsgStr: "Un descuento del 10%%",
-			expectedCount:  0,
 			expectChange:   false,
 		},
 		{
 			name:           "valid python format specifier",
+			flags: []string{"python-format"},
 			inputMsgId:     "Hello, %(name)s!",
 			inputMsgStr:    "¡Hola, %(name)s!",
-			expectedMsgId:  "Hello, %(name)s!",
 			expectedMsgStr: "¡Hola, %(name)s!",
-			expectedCount:  0,
 			expectChange:   false,
 		},
 		{
 			name:           "valid c-style format specifier",
+			flags: []string{"python-format"},
 			inputMsgId:     "Found %d items",
 			inputMsgStr:    "Se encontraron %d artículos",
-			expectedMsgId:  "Found %d items",
 			expectedMsgStr: "Se encontraron %d artículos",
-			expectedCount:  0,
 			expectChange:   false,
 		},
 		{
-			name:           "mixed case",
-			inputMsgId:     "A 10% discount for %(name)s",
-			inputMsgStr:    "Un 10% de descuento para %(name)s",
-			expectedMsgId:  "A 10%% discount for %(name)s",
-			expectedMsgStr: "Un 10%% de descuento para %(name)s",
-			expectedCount:  1,
+			name:           "specifiers with precision and width",
+			flags:          []string{"python-format"},
+			inputMsgId:     "%(rate).1f%% of %5d",
+			inputMsgStr:    "%(rate).1f% von %5d",
+			expectedMsgStr: "%(rate).1f%% von %5d",
 			expectChange:   true,
 		},
 		{
-			name:           "only in msgstr",
-			inputMsgId:     "A discount",
-			inputMsgStr:    "Un descuento del 10%",
-			expectedMsgId:  "A discount",
-			expectedMsgStr: "Un descuento del 10%%",
-			expectedCount:  1,
+			name:           "space before percent is not a space-flag specifier",
+			flags:          []string{"python-format"},
+			inputMsgId:     "%(count)s%% off",
+			inputMsgStr:    "%(count)s % de réduction",
+			expectedMsgStr: "%(count)s %% de réduction",
 			expectChange:   true,
+		},
+		{
+			name:           "unknown named placeholder is left for validation",
+			flags:          []string{"python-format"},
+			inputMsgId:     "%(count)s posts",
+			inputMsgStr:    "%(tag_count)s Beiträge",
+			expectedMsgStr: "%(tag_count)s Beiträge",
+			expectChange:   false,
 		},
 	}
 
@@ -403,8 +442,9 @@ func TestFixUnescapedPercents(t *testing.T) {
 			poFile := &po.File{
 				Messages: []po.Message{
 					{
-						MsgId:  tc.inputMsgId,
-						MsgStr: tc.inputMsgStr,
+						Comment: po.Comment{Flags: tc.flags},
+						MsgId:   tc.inputMsgId,
+						MsgStr:  tc.inputMsgStr,
 					},
 				},
 			}
@@ -412,11 +452,160 @@ func TestFixUnescapedPercents(t *testing.T) {
 			fixCount, madeChanges := fixUnescapedPercents(poFile)
 
 			assert.Equal(t, tc.expectChange, madeChanges)
-			assert.Equal(t, tc.expectedCount, fixCount)
-			assert.Equal(t, tc.expectedMsgId, poFile.Messages[0].MsgId)
+			if tc.expectChange {
+				assert.Equal(t, 1, fixCount)
+			} else {
+				assert.Equal(t, 0, fixCount)
+			}
+			assert.Equal(t, tc.inputMsgId, poFile.Messages[0].MsgId, "The msgid is the lookup key and must never change")
 			assert.Equal(t, tc.expectedMsgStr, poFile.Messages[0].MsgStr)
 		})
 	}
+
+	t.Run("fixes plural forms", func(t *testing.T) {
+		poFile := &po.File{
+			Messages: []po.Message{
+				{
+					Comment:      po.Comment{Flags: []string{"python-format"}},
+					MsgId:        "%(count)s item at 10%% off",
+					MsgIdPlural:  "%(count)s items at 10%% off",
+					MsgStrPlural: []string{"%(count)s article à 10 % de réduction", "%(count)s articles à 10 % de réduction"},
+				},
+			},
+		}
+
+		_, madeChanges := fixUnescapedPercents(poFile)
+
+		assert.True(t, madeChanges)
+		assert.Equal(t, []string{"%(count)s article à 10 %% de réduction", "%(count)s articles à 10 %% de réduction"}, poFile.Messages[0].MsgStrPlural)
+	})
+}
+
+func TestCheckTranslation(t *testing.T) {
+	pyFormat := po.Comment{Flags: []string{"python-format"}}
+	jsFormat := po.Comment{Flags: []string{"javascript-format"}}
+
+	testCases := []struct {
+		name     string
+		msg      po.Message
+		nplurals int
+		wantErr  string
+	}{
+		{
+			name: "matching named placeholder",
+			msg:  po.Message{Comment: pyFormat, MsgId: "Hello %(name)s", MsgStr: "Hallo %(name)s"},
+		},
+		{
+			name:    "renamed placeholder",
+			msg:     po.Message{Comment: pyFormat, MsgId: "Hello %(name)s", MsgStr: "Hallo %(nom)s"},
+			wantErr: "placeholder %(nom)s",
+		},
+		{
+			name:    "changed conversion",
+			msg:     po.Message{Comment: pyFormat, MsgId: "%(count)s left", MsgStr: "%(count)d übrig"},
+			wantErr: "placeholder %(count)d",
+		},
+		{
+			name:    "dropped placeholder",
+			msg:     po.Message{Comment: pyFormat, MsgId: "Hello %(name)s", MsgStr: "Hallo"},
+			wantErr: "missing placeholder %(name)s",
+		},
+		{
+			name:    "unescaped percent",
+			msg:     po.Message{Comment: pyFormat, MsgId: "%(n)s%% off", MsgStr: "%(n)s % Rabatt"},
+			wantErr: "unescaped %",
+		},
+		{
+			name:    "positional count differs",
+			msg:     po.Message{Comment: pyFormat, MsgId: "%s of %s", MsgStr: "%s"},
+			wantErr: "positional placeholders",
+		},
+		{
+			name:     "plural singular may spell out one",
+			msg:      po.Message{Comment: pyFormat, MsgId: "%(count)s post", MsgIdPlural: "%(count)s posts", MsgStrPlural: []string{"Ein Beitrag", "%(count)s Beiträge"}},
+			nplurals: 2,
+		},
+		{
+			name:     "plural form missing placeholder",
+			msg:      po.Message{Comment: pyFormat, MsgId: "%(count)s post", MsgIdPlural: "%(count)s posts", MsgStrPlural: []string{"%(count)s Beitrag", "Beiträge"}},
+			nplurals: 2,
+			wantErr:  "msgstr[1] is missing placeholder %(count)s",
+		},
+		{
+			name:     "single-form language needs the plural's placeholders",
+			msg:      po.Message{Comment: pyFormat, MsgId: "%(count)s post", MsgIdPlural: "%(count)s posts", MsgStrPlural: []string{"投稿"}},
+			nplurals: 1,
+			wantErr:  "msgstr[0] is missing placeholder %(count)s",
+		},
+		{
+			name:     "fuzzy carry-over from another string",
+			msg:      po.Message{Comment: pyFormat, MsgId: "%(count)s draft", MsgIdPlural: "%(count)s drafts", MsgStrPlural: []string{"%(tag_count)s Tag", "%(tag_count)s Tags"}},
+			nplurals: 2,
+			wantErr:  "placeholder %(tag_count)s",
+		},
+		{
+			name: "javascript percent sign is literal",
+			msg:  po.Message{Comment: jsFormat, MsgId: "%(n)s at 50% off", MsgStr: "%(n)s à 50 % de réduction"},
+		},
+		{
+			name:    "javascript renamed placeholder",
+			msg:     po.Message{Comment: jsFormat, MsgId: "%(n)s left", MsgStr: "%(m)s übrig"},
+			wantErr: "placeholder %(m)s",
+		},
+		{
+			name: "unflagged entries are not checked",
+			msg:  po.Message{MsgId: "50% off", MsgStr: "50 % de réduction"},
+		},
+		{
+			name: "empty forms are left to the completeness check",
+			msg:  po.Message{Comment: pyFormat, MsgId: "Hello %(name)s"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkTranslation(tc.msg, tc.nplurals)
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestClearInvalidTranslations(t *testing.T) {
+	poFile := &po.File{
+		Messages: []po.Message{
+			{
+				Comment:      po.Comment{Flags: []string{"python-format"}},
+				MsgId:        "%(count)s draft",
+				MsgIdPlural:  "%(count)s drafts",
+				MsgStrPlural: []string{"%(tag_count)s Tag", "%(tag_count)s Tags"},
+			},
+			{
+				Comment: po.Comment{Flags: []string{"python-format"}},
+				MsgId:   "Hello %(name)s",
+				MsgStr:  "Hallo %(name)s",
+			},
+		},
+	}
+	logger := zerolog.Nop()
+
+	count, changed := clearInvalidTranslations(poFile, &logger)
+
+	assert.True(t, changed)
+	assert.Equal(t, 1, count)
+	assert.Equal(t, []string{"", ""}, poFile.Messages[0].MsgStrPlural, "Both forms should be cleared, keeping the form count")
+	assert.Equal(t, "Hallo %(name)s", poFile.Messages[1].MsgStr, "Valid translations are kept")
+}
+
+func TestIsMessageTranslatedNeedsEveryPluralForm(t *testing.T) {
+	msg := po.Message{MsgId: "%(n)s post", MsgIdPlural: "%(n)s posts", MsgStrPlural: []string{"%(n)s post", "%(n)s posts"}}
+
+	assert.True(t, isMessageTranslated(msg, 2))
+	assert.False(t, isMessageTranslated(msg, 3), "Two forms are not enough for a three-form language")
 }
 
 func TestPreprocessFile_RevertIfUnchanged(t *testing.T) {
@@ -561,6 +750,89 @@ msgstr "Hola"
 	finalContent, err := os.ReadFile(poPath)
 	require.NoError(t, err)
 	assert.Equal(t, string(originalContent), string(finalContent))
+}
+
+// commitPoFile creates a git repository holding a committed .po file with the
+// given content, then overwrites the working copy with modified.
+func commitPoFile(t *testing.T, committed, modified string) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found, skipping test")
+	}
+
+	tempDir := t.TempDir()
+	runCmd := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tempDir
+		require.NoError(t, cmd.Run(), "failed to run git command: git %s", strings.Join(args, " "))
+	}
+	runCmd("init")
+	runCmd("config", "user.name", "Test")
+	runCmd("config", "user.email", "test@example.com")
+
+	poPath := filepath.Join(tempDir, "test.po")
+	require.NoError(t, os.WriteFile(poPath, []byte(committed), 0644))
+	runCmd("add", "test.po")
+	runCmd("commit", "-m", "Initial")
+	require.NoError(t, os.WriteFile(poPath, []byte(modified), 0644))
+	return poPath
+}
+
+func TestPreprocessFile_RevertKeepsChangedEntries(t *testing.T) {
+	committed := "msgid \"\"\nmsgstr \"\"\n\"Language: de\\n\"\n\nmsgid \"Hello\"\nmsgstr \"Hallo\"\n\nmsgid \"Removed\"\nmsgstr \"Entfernt\"\n"
+
+	testCases := []struct {
+		name     string
+		modified string
+	}{
+		{"string removed by makemessages", "msgid \"Hello\"\nmsgstr \"Hallo\"\n"},
+		{"translation edited by hand", "msgid \"Hello\"\nmsgstr \"Guten Tag\"\n\nmsgid \"Removed\"\nmsgstr \"Entfernt\"\n"},
+	}
+
+	revertIfUnchanged = true
+	defer func() { revertIfUnchanged = false }()
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			poPath := commitPoFile(t, committed, tc.modified)
+
+			untranslated, err := preprocessFile(poPath)
+			require.NoError(t, err)
+			assert.Empty(t, untranslated)
+
+			poFile, err := po.LoadFile(poPath)
+			require.NoError(t, err)
+			assert.Equal(t, renderEntries(&po.File{Messages: mustLoad(t, tc.modified).Messages}), renderEntries(poFile), "The working copy's entries must survive")
+		})
+	}
+}
+
+func TestPreprocessFile_DryRunDoesNotRevert(t *testing.T) {
+	committed := "msgid \"Hello\"\nmsgstr \"Hallo\"\n"
+	modified := "msgid \"\"\nmsgstr \"\"\n\"POT-Creation-Date: 2026-10-06\\n\"\n\nmsgid \"Hello\"\nmsgstr \"Hallo\"\n"
+	poPath := commitPoFile(t, committed, modified)
+
+	revertIfUnchanged = true
+	dryRun = true
+	defer func() {
+		revertIfUnchanged = false
+		dryRun = false
+	}()
+
+	_, err := preprocessFile(poPath)
+	require.NoError(t, err)
+
+	final, err := os.ReadFile(poPath)
+	require.NoError(t, err)
+	assert.Equal(t, modified, string(final), "A dry run must not touch the file")
+}
+
+// mustLoad parses .po content.
+func mustLoad(t *testing.T, content string) *po.File {
+	t.Helper()
+	poFile, err := po.Load([]byte(content))
+	require.NoError(t, err)
+	return poFile
 }
 
 func TestRunWithConfirmation_YesFlag(t *testing.T) {
@@ -1041,4 +1313,70 @@ msgstr "Bonjour"
 	reloaded, err := po.LoadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, 3, getNPlurals(reloaded.MimeHeader), "Plural count should survive the round trip")
+}
+
+// fixedProvider answers every request with the same results.
+type fixedProvider struct {
+	results []translator.TranslationResult
+}
+
+func (f *fixedProvider) Translate(ctx context.Context, messages []po.Message, sourceLang, targetLang string, nplurals int) ([]translator.TranslationResult, error) {
+	return f.results, nil
+}
+
+func (f *fixedProvider) String() string { return "fixed" }
+
+func TestTranslateFileDiscardsInvalidTranslations(t *testing.T) {
+	content := `msgid ""
+msgstr ""
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#, python-format
+msgid "%(count)s draft"
+msgid_plural "%(count)s drafts"
+msgstr[0] ""
+msgstr[1] ""
+
+#, python-format
+msgid "%(name)s saved %(rate)s%% more"
+msgstr ""
+
+#, python-format
+msgid "Hello %(name)s"
+msgstr ""
+
+msgid "Plain"
+msgstr ""
+`
+	path := filepath.Join(t.TempDir(), "django.po")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	fix = true
+	defer func() { fix = false }()
+
+	provider := &fixedProvider{results: []translator.TranslationResult{
+		// Placeholder carried over from another string.
+		{PluralStr: []string{"%(tag_count)s Entwurf", "%(tag_count)s Entwürfe"}},
+		// Valid once its stray percent sign is escaped.
+		{MsgStr: "%(name)s hat %(rate)s % mehr gespart"},
+		// Dropped placeholder.
+		{MsgStr: "Hallo"},
+		// Empty.
+		{MsgStr: ""},
+	}}
+
+	translated, err := translateFile(context.Background(), provider, path, 10)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), translated, "Only the valid translation should count")
+
+	poFile, err := po.LoadFile(path)
+	require.NoError(t, err)
+	byID := make(map[string]po.Message)
+	for _, msg := range poFile.Messages {
+		byID[msg.MsgId] = msg
+	}
+	assert.Equal(t, []string{"", ""}, byID["%(count)s draft"].MsgStrPlural)
+	assert.Equal(t, "%(name)s hat %(rate)s %% mehr gespart", byID["%(name)s saved %(rate)s%% more"].MsgStr)
+	assert.Empty(t, byID["Hello %(name)s"].MsgStr)
+	assert.Empty(t, byID["Plain"].MsgStr)
 }
