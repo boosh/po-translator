@@ -95,6 +95,52 @@ func TestClearFuzzyEntries(t *testing.T) {
 		assert.Empty(t, processedMsg.MsgStr, "Translation should be cleared for a changed msgid")
 	})
 
+	t.Run("clears plural translations when msgid has substantive changes", func(t *testing.T) {
+		poFile := &po.File{
+			Messages: []po.Message{
+				{
+					Comment: po.Comment{
+						Flags:     []string{"fuzzy", "python-format"},
+						PrevMsgId: "%(tag_count)s tag",
+					},
+					MsgId:        "%(count)s draft",
+					MsgIdPlural:  "%(count)s drafts",
+					MsgStrPlural: []string{"%(tag_count)s Tag", "%(tag_count)s Tags"},
+				},
+			},
+		}
+		fuzzyCount, madeChanges := clearFuzzyEntries(poFile)
+
+		assert.True(t, madeChanges, "Should report changes when processing a fuzzy entry")
+		assert.Equal(t, 1, fuzzyCount, "Should process one fuzzy entry")
+		processedMsg := poFile.Messages[0]
+		assert.NotContains(t, processedMsg.Comment.Flags, "fuzzy", "Fuzzy flag should be removed")
+		assert.Contains(t, processedMsg.Comment.Flags, "python-format", "Other flags should be kept")
+		assert.Equal(t, []string{"", ""}, processedMsg.MsgStrPlural, "Every plural form should be cleared")
+		assert.False(t, isMessageTranslated(processedMsg), "Entry should be queued for translation")
+	})
+
+	t.Run("clears plural translations even when the previous msgid matches", func(t *testing.T) {
+		// The parser stores the previous msgid_plural in PrevMsgId, so a match
+		// says nothing about whether the singular changed.
+		poFile := &po.File{
+			Messages: []po.Message{
+				{
+					Comment: po.Comment{
+						Flags:     []string{"fuzzy"},
+						PrevMsgId: "%(count)s posts",
+					},
+					MsgId:        "%(count)s post",
+					MsgIdPlural:  "%(count)s posts",
+					MsgStrPlural: []string{"%(count)s Beitrag", "%(count)s Beiträge"},
+				},
+			},
+		}
+		clearFuzzyEntries(poFile)
+
+		assert.Equal(t, []string{"", ""}, poFile.Messages[0].MsgStrPlural, "Every plural form should be cleared")
+	})
+
 	t.Run("ignores fuzzy entry without a previous msgid", func(t *testing.T) {
 		poFile := &po.File{
 			Messages: []po.Message{
@@ -965,4 +1011,34 @@ func TestTranslateFileStrictStopsAtFirstFailedChunk(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "chunk 1-2")
 	assert.Len(t, provider.calls, 1, "strict mode should not try the next chunk")
+}
+
+func TestSavePoFileKeepsHeaderFields(t *testing.T) {
+	// gettext-go drops Plural-Forms on write and orders unknown fields by map
+	// iteration; a load/save round trip must keep the former and sort the latter.
+	path := filepath.Join(t.TempDir(), "django.po")
+	content := `msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Plural-Forms: nplurals=3; plural=(n == 0 || n == 1) ? 0 : n != 0 && n % 1000000 == 0 ? 1 : 2;\n"
+"X-Zeta: z\n"
+"X-Alpha: a\n"
+
+msgid "Hello"
+msgstr "Bonjour"
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	poFile, err := po.LoadFile(path)
+	require.NoError(t, err)
+	require.NoError(t, savePoFile(poFile, path))
+
+	saved, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(saved), `"Plural-Forms: nplurals=3; plural=(n == 0 || n == 1) ? 0 : n != 0 && n % 1000000 == 0 ? 1 : 2;\n"`)
+	assert.Less(t, strings.Index(string(saved), "X-Alpha"), strings.Index(string(saved), "X-Zeta"), "Unknown fields should be sorted")
+
+	reloaded, err := po.LoadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, 3, getNPlurals(reloaded.MimeHeader), "Plural count should survive the round trip")
 }

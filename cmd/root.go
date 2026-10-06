@@ -512,7 +512,17 @@ func clearFuzzyEntries(poFile *po.File) (fuzzyCount int, madeChanges bool) {
 		currentMsgId := strings.TrimSpace(poFile.Messages[i].MsgId)
 		prevMsgId := strings.TrimSpace(poFile.Messages[i].Comment.PrevMsgId)
 
-		if currentMsgId != prevMsgId {
+		// The po parser reads "#| msgid_plural" into PrevMsgId too, overwriting
+		// the previous singular, so a plural entry's previous msgids can't be
+		// compared. msgmerge's guess for a plural is usually a different string
+		// with different placeholders, which msgfmt then rejects, so plurals are
+		// always retranslated.
+		if poFile.Messages[i].MsgIdPlural != "" {
+			poFile.Messages[i].MsgStr = ""
+			for j := range poFile.Messages[i].MsgStrPlural {
+				poFile.Messages[i].MsgStrPlural[j] = ""
+			}
+		} else if currentMsgId != prevMsgId {
 			poFile.Messages[i].MsgStr = ""
 		}
 
@@ -701,9 +711,33 @@ func sortMessages(poFile *po.File) bool {
 	return false
 }
 
+// formatHeader renders the PO header. gettext-go's Header.String() never writes
+// Plural-Forms and writes unknown fields in map order, so both are appended
+// here, the unknown fields sorted so saves are deterministic.
+func formatHeader(header po.Header) string {
+	unknownFields := header.UnknowFields
+	header.UnknowFields = nil
+
+	var buf bytes.Buffer
+	buf.WriteString(header.String())
+	if header.PluralForms != "" {
+		fmt.Fprintf(&buf, `"%s: %s\n"`+"\n", "Plural-Forms", header.PluralForms)
+	}
+
+	keys := make([]string, 0, len(unknownFields))
+	for k := range unknownFields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(&buf, `"%s: %s\n"`+"\n", k, unknownFields[k])
+	}
+	return buf.String()
+}
+
 func savePoFile(poFile *po.File, path string) error {
 	var buf bytes.Buffer
-	buf.WriteString(poFile.MimeHeader.String())
+	buf.WriteString(formatHeader(poFile.MimeHeader))
 	buf.WriteString("\n")
 
 	for _, msg := range poFile.Messages {
