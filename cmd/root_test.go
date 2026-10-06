@@ -354,7 +354,7 @@ func TestDeduplicateEntries(t *testing.T) {
 func TestFixUnescapedPercents(t *testing.T) {
 	testCases := []struct {
 		name           string
-		flags []string
+		flags          []string
 		inputMsgId     string
 		inputMsgStr    string
 		expectedMsgStr string
@@ -375,7 +375,7 @@ func TestFixUnescapedPercents(t *testing.T) {
 			expectChange:   true,
 		},
 		{
-			name: "no percents",
+			name:           "no percents",
 			inputMsgId:     "A simple string",
 			inputMsgStr:    "Una cadena simple",
 			expectedMsgStr: "Una cadena simple",
@@ -397,7 +397,7 @@ func TestFixUnescapedPercents(t *testing.T) {
 		},
 		{
 			name:           "valid python format specifier",
-			flags: []string{"python-format"},
+			flags:          []string{"python-format"},
 			inputMsgId:     "Hello, %(name)s!",
 			inputMsgStr:    "¡Hola, %(name)s!",
 			expectedMsgStr: "¡Hola, %(name)s!",
@@ -405,7 +405,7 @@ func TestFixUnescapedPercents(t *testing.T) {
 		},
 		{
 			name:           "valid c-style format specifier",
-			flags: []string{"python-format"},
+			flags:          []string{"python-format"},
 			inputMsgId:     "Found %d items",
 			inputMsgStr:    "Se encontraron %d artículos",
 			expectedMsgStr: "Se encontraron %d artículos",
