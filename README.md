@@ -117,6 +117,40 @@ This two-pass design ensures that cleanup and translation are decoupled, and tha
 Because each chunk is saved as it completes and every run only sends entries whose `msgstr` is empty, re-running the
 same command is how you retry failures. Nothing already translated is paid for twice.
 
+### Validation
+
+A translation is discarded, leaving the entry for a later run, if it breaks its source:
+
+* `python-format` and `javascript-format` placeholders must match the `msgid`.
+* HTML tags must all be kept with their attributes unchanged. Order and whitespace inside a tag don't matter.
+* `{brace}` placeholders must match.
+* Leading and trailing whitespace must match, since templates and concatenated strings rely on it.
+
+The singular form of a plural may leave out named placeholders, since languages often spell out "one". The same checks
+run over existing translations in the pre-processing pass, clearing any that fail so they are translated again.
+
+### House style
+
+Each chunk is translated independently, so without guidance a model picks the formality and language variant afresh for
+every chunk. `--style` takes a YAML file that fixes them for every request:
+
+```yaml
+# Applies to every language.
+instructions: |
+  Friendly and direct.
+
+# Keyed by the locale code in the .po file's path.
+languages:
+  es:
+    name: Spanish (Spain)        # How the prompt names the language, including its variant.
+    instructions: |
+      Address the user as tú.
+    glossary: # Terms that must always be translated the same way.
+      seat: plaza
+```
+
+Every language being translated must have an entry, so that none silently skips the style. Unknown keys are rejected.
+
 ## CLI Reference
 
 ### Usage
@@ -154,6 +188,7 @@ po-translator [flags] <glob-pattern...>
 | `--log-level`           | `string`   | `info`  | Log level (`debug`, `info`, `warn`, `error`).                                                                                           |
 | `--log-file`            | `string`   |         | Path to log file for output. Defaults to stderr.                                                                                        |
 | `--log-prompt`          | `bool`     | `false` | Log the full prompt sent to the AI provider (for debugging).                                                                            |
+| `--style`               | `string`   |         | YAML file with the house style: brand voice, and per-language name, instructions and glossary. See [House style](#house-style).         |
 
 ## AI Provider Setup
 

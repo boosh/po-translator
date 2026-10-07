@@ -26,7 +26,7 @@ type mockProvider struct {
 	translatedMessages  int
 }
 
-func (m *mockProvider) Translate(ctx context.Context, messages []po.Message, sourceLang, targetLang string, nplurals int) ([]translator.TranslationResult, error) {
+func (m *mockProvider) Translate(ctx context.Context, messages []po.Message, sourceLang string, target translator.Target, nplurals int) ([]translator.TranslationResult, error) {
 	m.translationRequests++
 	m.translatedMessages += len(messages)
 	// Return a slice of empty results to simulate translation
@@ -553,12 +553,75 @@ func TestCheckTranslation(t *testing.T) {
 			wantErr: "placeholder %(m)s",
 		},
 		{
-			name: "unflagged entries are not checked",
+			name: "unflagged entries' percent signs are not checked",
 			msg:  po.Message{MsgId: "50% off", MsgStr: "50 % de réduction"},
 		},
 		{
 			name: "empty forms are left to the completeness check",
 			msg:  po.Message{Comment: pyFormat, MsgId: "Hello %(name)s"},
+		},
+		{
+			name: "tags kept, in a different order",
+			msg:  po.Message{MsgId: `<b>Save</b> or <a href="/x">cancel</a>`, MsgStr: `<a href="/x">Cancelar</a> o <b>guardar</b>`},
+		},
+		{
+			name: "tag split over lines is the same tag",
+			msg:  po.Message{MsgId: "Read the <a\n    href=\"/terms\">terms</a>", MsgStr: `Lee los <a href="/terms">términos</a>`},
+		},
+		{
+			name:    "changed attribute value",
+			msg:     po.Message{MsgId: `<textarea name="query"></textarea>`, MsgStr: `<textarea name="consulta"></textarea>`},
+			wantErr: "msgstr has HTML tags",
+		},
+		{
+			name:    "dropped tag",
+			msg:     po.Message{MsgId: "Save <b>now</b>", MsgStr: "Guarda ahora"},
+			wantErr: "msgstr has HTML tags",
+		},
+		{
+			name:    "changed attribute",
+			msg:     po.Message{MsgId: `<a href="%(url)s">contact us</a>`, MsgStr: `<a href="%(link)s">contáctanos</a>`},
+			wantErr: "msgstr has HTML tags",
+		},
+		{
+			name:    "tag added that the source doesn't have",
+			msg:     po.Message{MsgId: "Save now", MsgStr: "Guarda <b>ahora</b>"},
+			wantErr: "msgstr has HTML tags",
+		},
+		{
+			name:    "dropped brace placeholder",
+			msg:     po.Message{MsgId: "E.g., {url}", MsgStr: "P. ej., la URL"},
+			wantErr: "msgstr has placeholders",
+		},
+		{
+			name:    "renamed brace placeholder",
+			msg:     po.Message{MsgId: "Failed for {org_name}", MsgStr: "Falló para {organizacion}"},
+			wantErr: "msgstr has placeholders",
+		},
+		{
+			name:     "plural singular may spell out a brace placeholder",
+			msg:      po.Message{MsgId: "{count} item", MsgIdPlural: "{count} items", MsgStrPlural: []string{"Un elemento", "{count} elementos"}},
+			nplurals: 2,
+		},
+		{
+			name:     "plural singular can't invent a brace placeholder",
+			msg:      po.Message{MsgId: "{count} item", MsgIdPlural: "{count} items", MsgStrPlural: []string{"{n} elemento", "{count} elementos"}},
+			nplurals: 2,
+			wantErr:  "msgstr[0] has placeholder {n}",
+		},
+		{
+			name:    "lost leading space",
+			msg:     po.Message{MsgId: " (draft)", MsgStr: "(borrador)"},
+			wantErr: "leading/trailing whitespace",
+		},
+		{
+			name:    "lost template indentation",
+			msg:     po.Message{MsgId: "\n    Generating titles\n  ", MsgStr: "Generando títulos"},
+			wantErr: "leading/trailing whitespace",
+		},
+		{
+			name: "template indentation kept",
+			msg:  po.Message{MsgId: "\n    Generating titles\n  ", MsgStr: "\n    Generando títulos\n  "},
 		},
 	}
 
@@ -1185,7 +1248,7 @@ type scriptedProvider struct {
 	calls      [][]string
 }
 
-func (s *scriptedProvider) Translate(ctx context.Context, messages []po.Message, sourceLang, targetLang string, nplurals int) ([]translator.TranslationResult, error) {
+func (s *scriptedProvider) Translate(ctx context.Context, messages []po.Message, sourceLang string, target translator.Target, nplurals int) ([]translator.TranslationResult, error) {
 	var ids []string
 	for _, msg := range messages {
 		ids = append(ids, msg.MsgId)
@@ -1362,7 +1425,7 @@ type fixedProvider struct {
 	results []translator.TranslationResult
 }
 
-func (f *fixedProvider) Translate(ctx context.Context, messages []po.Message, sourceLang, targetLang string, nplurals int) ([]translator.TranslationResult, error) {
+func (f *fixedProvider) Translate(ctx context.Context, messages []po.Message, sourceLang string, target translator.Target, nplurals int) ([]translator.TranslationResult, error) {
 	return f.results, nil
 }
 
@@ -1421,4 +1484,47 @@ msgstr ""
 	assert.Equal(t, "%(name)s hat %(rate)s %% mehr gespart", byID["%(name)s saved %(rate)s%% more"].MsgStr)
 	assert.Empty(t, byID["Hello %(name)s"].MsgStr)
 	assert.Empty(t, byID["Plain"].MsgStr)
+}
+
+// targetRecorder records the target of every request and leaves entries untranslated.
+type targetRecorder struct {
+	targets []translator.Target
+}
+
+func (r *targetRecorder) Translate(ctx context.Context, messages []po.Message, sourceLang string, target translator.Target, nplurals int) ([]translator.TranslationResult, error) {
+	r.targets = append(r.targets, target)
+	return make([]translator.TranslationResult, len(messages)), nil
+}
+
+func (r *targetRecorder) String() string { return "recorder" }
+
+func TestTranslateFileUsesHouseStyleForItsLanguage(t *testing.T) {
+	// The file's locale directory picks its language's style; a language the
+	// style doesn't cover fails the file before anything is sent.
+	content := "msgid \"Hello\"\nmsgstr \"\"\n"
+	dir := t.TempDir()
+	esPath := filepath.Join(dir, "locale", "es", "LC_MESSAGES", "django.po")
+	frPath := filepath.Join(dir, "locale", "fr", "LC_MESSAGES", "django.po")
+	for _, path := range []string{esPath, frPath} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+	}
+
+	houseStyle = &translator.Style{
+		Instructions: "Friendly.",
+		Languages:    map[string]translator.LanguageStyle{"es": {Name: "Spanish (Spain)", Instructions: "Use tú."}},
+	}
+	defer func() { houseStyle = nil }()
+
+	recorder := &targetRecorder{}
+	_, err := translateFile(context.Background(), recorder, esPath, 10, 0)
+	require.NoError(t, err)
+	require.Len(t, recorder.targets, 1)
+	assert.Equal(t, "Spanish (Spain)", recorder.targets[0].Name)
+	assert.Equal(t, []string{"Friendly.", "Use tú."}, recorder.targets[0].Instructions)
+
+	_, err = translateFile(context.Background(), recorder, frPath, 10, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `no entry for language "fr"`)
+	assert.Len(t, recorder.targets, 1, "Nothing should be sent for an uncovered language")
 }

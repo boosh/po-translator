@@ -23,10 +23,14 @@ func TestBuildTranslationPrompt(t *testing.T) {
 		},
 	}
 
-	prompt, err := buildTranslationPrompt(messages, "English", "pl", 3)
+	prompt, err := buildTranslationPrompt(messages, "English", Target{Code: "pl", Name: "pl"}, 3)
 	require.NoError(t, err)
 
 	assert.Contains(t, prompt, "translate a list of messages from English to pl")
+	// Without a style, the source sets the tone and no guide is rendered.
+	assert.Contains(t, prompt, "Maintain the tone and formality of the source text.")
+	assert.NotContains(t, prompt, "STYLE GUIDE")
+	assert.NotContains(t, prompt, "GLOSSARY")
 	// Placeholders must survive into the payload untouched.
 	assert.Contains(t, prompt, `"msgid": "Welcome, %(name)s"`)
 	assert.Contains(t, prompt, `"msgctxt": "menu"`)
@@ -37,6 +41,30 @@ func TestBuildTranslationPrompt(t *testing.T) {
 	assert.Contains(t, prompt, `"msgid_plural": "%d files"`)
 	assert.Contains(t, prompt, `"is_plural": true`)
 	assert.Contains(t, prompt, `"is_plural": false`)
+}
+
+func TestBuildTranslationPromptWithStyle(t *testing.T) {
+	// A styled target names the variant, defers the tone to the guide, and
+	// carries the instructions and glossary ahead of the messages.
+	target := Target{
+		Code:         "es",
+		Name:         "Spanish (Spain)",
+		Instructions: []string{"Friendly and direct.", "Address the user as tú."},
+		Glossary:     []GlossaryEntry{{"brief", "brief"}, {"seat", "plaza"}},
+	}
+
+	prompt, err := buildTranslationPrompt([]po.Message{{MsgId: "Hello"}}, "English", target, 2)
+	require.NoError(t, err)
+
+	assert.Contains(t, prompt, "translate a list of messages from English to Spanish (Spain)")
+	assert.NotContains(t, prompt, "Maintain the tone and formality of the source text.")
+	assert.Contains(t, prompt, "Follow the STYLE GUIDE and GLOSSARY below")
+	assert.Contains(t, prompt, "STYLE GUIDE:\nFriendly and direct.\nAddress the user as tú.\n")
+	assert.Contains(t, prompt, "- brief: brief\n- seat: plaza\n")
+
+	guide := strings.Index(prompt, "STYLE GUIDE:")
+	messages := strings.Index(prompt, "MESSAGES TO TRANSLATE:")
+	assert.Less(t, guide, messages, "The guide should come before the messages")
 }
 
 func TestParseTranslationResults(t *testing.T) {

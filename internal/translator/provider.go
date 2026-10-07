@@ -21,7 +21,7 @@ type TranslationResult struct {
 type Provider interface {
 	// Translate processes a slice of po.Messages and returns their translations.
 	// For plural messages, nplurals indicates how many plural forms the target language requires.
-	Translate(ctx context.Context, messages []po.Message, sourceLang, targetLang string, nplurals int) ([]TranslationResult, error)
+	Translate(ctx context.Context, messages []po.Message, sourceLang string, target Target, nplurals int) ([]TranslationResult, error)
 	String() string
 }
 
@@ -66,7 +66,7 @@ type promptEntry struct {
 }
 
 // buildTranslationPrompt renders the instructions and message payload sent to any provider.
-func buildTranslationPrompt(messages []po.Message, sourceLang, targetLang string, nplurals int) (string, error) {
+func buildTranslationPrompt(messages []po.Message, sourceLang string, target Target, nplurals int) (string, error) {
 	promptEntries := make([]promptEntry, len(messages))
 	for i, msg := range messages {
 		// Extract developer comments from the structured fields.
@@ -116,14 +116,44 @@ RULES:
     - The first element is the translation for "one" (or the singular form in the target language).
     - Subsequent elements are for "two", "few", "many", etc., as required by the language's pluralization rules.
 5.  Preserve ALL original placeholders, like %%(name)s, {count}, %%s, etc., exactly as they appear in the source.
-6.  Maintain the tone and formality of the source text.
-7.  Do not include the original English text in your response. Only provide the translations.
-
+6.  Preserve HTML tags and their attributes exactly, and keep any leading or trailing whitespace of the source.
+7.  %s
+8.  Do not include the original English text in your response. Only provide the translations.
+%s
 MESSAGES TO TRANSLATE:
 %s
 
 Your response must be a JSON array of objects in the specified format.
-`, sourceLang, targetLang, targetLang, string(jsonEntries)), nil
+`, sourceLang, target.Name, target.Name, toneRule(target), styleGuide(target), string(jsonEntries)), nil
+}
+
+// toneRule is the prompt's rule on tone, which defers to the style guide when
+// there is one, since the source's formality is not what the guide asks for.
+func toneRule(target Target) string {
+	if len(target.Instructions) == 0 && len(target.Glossary) == 0 {
+		return "Maintain the tone and formality of the source text."
+	}
+	return "Follow the STYLE GUIDE and GLOSSARY below for every message, including its form of address and language variant."
+}
+
+// styleGuide renders the target's style instructions and glossary as prompt
+// sections, or nothing when the target has neither.
+func styleGuide(target Target) string {
+	var b strings.Builder
+	if len(target.Instructions) > 0 {
+		b.WriteString("\nSTYLE GUIDE:\n")
+		for _, text := range target.Instructions {
+			b.WriteString(text)
+			b.WriteString("\n")
+		}
+	}
+	if len(target.Glossary) > 0 {
+		b.WriteString("\nGLOSSARY (always translate these terms this way, inflecting them as the grammar requires):\n")
+		for _, entry := range target.Glossary {
+			fmt.Fprintf(&b, "- %s: %s\n", entry.Term, entry.Translation)
+		}
+	}
+	return b.String()
 }
 
 // parseTranslationResults decodes a provider's raw response into translations, tolerating

@@ -9,16 +9,16 @@ import (
 	"github.com/chai2010/gettext-go/po"
 )
 
-// TranslateChunk sends a chunk of entries to an AI provider for translation.
-func TranslateChunk(ctx context.Context, provider Provider, messages []po.Message, filePath string, nplurals int) ([]TranslationResult, error) {
-	targetLang := ExtractTargetLanguage(filePath)
+// TranslateChunk sends a chunk of entries to an AI provider for translation
+// into the target language.
+func TranslateChunk(ctx context.Context, provider Provider, messages []po.Message, target Target, nplurals int) ([]TranslationResult, error) {
 	sourceLang := "English" // This could be made configurable later
 
 	if len(messages) == 0 {
 		return []TranslationResult{}, nil
 	}
 
-	translations, err := provider.Translate(ctx, messages, sourceLang, targetLang, nplurals)
+	translations, err := provider.Translate(ctx, messages, sourceLang, target, nplurals)
 	if err != nil {
 		return nil, fmt.Errorf("provider failed to translate chunk: %w", err)
 	}

@@ -43,8 +43,8 @@ func (p *GoogleProvider) String() string {
 }
 
 // Translate sends a translation request to the Google Generative AI API.
-func (p *GoogleProvider) Translate(ctx context.Context, messages []po.Message, sourceLang, targetLang string, nplurals int) ([]TranslationResult, error) {
-	prompt, err := buildTranslationPrompt(messages, sourceLang, targetLang, nplurals)
+func (p *GoogleProvider) Translate(ctx context.Context, messages []po.Message, sourceLang string, target Target, nplurals int) ([]TranslationResult, error) {
+	prompt, err := buildTranslationPrompt(messages, sourceLang, target, nplurals)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build prompt: %w", err)
 	}

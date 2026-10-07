@@ -55,7 +55,7 @@ func TestOpenAICompatibleProviderTranslate(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.name, provider.String())
 
-			results, err := provider.Translate(context.Background(), []po.Message{{MsgId: "Hello"}}, "English", "de", 2)
+			results, err := provider.Translate(context.Background(), []po.Message{{MsgId: "Hello"}}, "English", Target{Code: "de", Name: "de"}, 2)
 			require.NoError(t, err)
 			require.Len(t, results, 1)
 			assert.Equal(t, "Hallo", results[0].MsgStr)
@@ -115,7 +115,7 @@ func TestOpenAICompatibleProviderRetryUsesConfiguredDelay(t *testing.T) {
 	require.NoError(t, err)
 
 	start := time.Now()
-	results, err := provider.Translate(context.Background(), []po.Message{{MsgId: "Hello"}}, "English", "de", 2)
+	results, err := provider.Translate(context.Background(), []po.Message{{MsgId: "Hello"}}, "English", Target{Code: "de", Name: "de"}, 2)
 	elapsed := time.Since(start)
 
 	require.NoError(t, err)
@@ -157,7 +157,7 @@ func TestOpenAICompatibleProviderRetriesCountMismatch(t *testing.T) {
 	require.NoError(t, err)
 
 	messages := []po.Message{{MsgId: "Hello"}, {MsgId: "Goodbye"}}
-	results, err := provider.Translate(context.Background(), messages, "English", "de", 2)
+	results, err := provider.Translate(context.Background(), messages, "English", Target{Code: "de", Name: "de"}, 2)
 	require.NoError(t, err)
 	require.Len(t, results, 2)
 	assert.Equal(t, "Hallo", results[0].MsgStr)
@@ -190,7 +190,7 @@ func TestOpenAICompatibleProviderGivesUpAfterMaxRetries(t *testing.T) {
 	require.NoError(t, err)
 
 	start := time.Now()
-	_, err = provider.Translate(context.Background(), []po.Message{{MsgId: "Hello"}}, "English", "de", 2)
+	_, err = provider.Translate(context.Background(), []po.Message{{MsgId: "Hello"}}, "English", Target{Code: "de", Name: "de"}, 2)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)

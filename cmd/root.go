@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/chai2010/gettext-go/po"
@@ -49,6 +51,10 @@ var (
 	revertIfUnchanged bool
 	yes               bool
 	logPrompt         bool
+	styleFile         string
+
+	// houseStyle is loaded from --style; nil when no style file is given.
+	houseStyle *translator.Style
 )
 
 var rootCmd = &cobra.Command{
@@ -82,6 +88,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&revertIfUnchanged, "revert-if-unchanged", false, "Revert .po file to its git HEAD version if its entries match HEAD")
 	rootCmd.Flags().BoolVarP(&yes, "yes", "y", false, "Automatically answer yes to all prompts and skip confirmation")
 	rootCmd.Flags().BoolVar(&logPrompt, "log-prompt", false, "Log the full prompt sent to the AI provider (for debugging)")
+	rootCmd.Flags().StringVar(&styleFile, "style", "", "YAML file with the house style: brand voice, and per-language name, instructions and glossary")
 }
 
 func Execute() {
@@ -136,6 +143,20 @@ func run(cmd *cobra.Command, args []string) {
 		log.Info().Msg("Pre-processing complete. No new translations needed.")
 		logSummary(len(allFiles), 0, totalErrors, start)
 		return
+	}
+
+	// A file whose language the style doesn't cover would be translated without
+	// it, so the run stops before anything is sent rather than part-way through.
+	if styleFile != "" {
+		houseStyle, err = translator.LoadStyle(styleFile)
+		if err != nil {
+			log.Fatal().Err(err).Msg("Failed to load style file")
+		}
+		for _, path := range filesToTranslate {
+			if _, err := houseStyle.Target(translator.ExtractTargetLanguage(path)); err != nil {
+				log.Fatal().Err(err).Str("file", path).Msg("Style file doesn't cover this file's language")
+			}
+		}
 	}
 
 	// The provider is set up before the prompt, so that a missing key or model
@@ -466,6 +487,11 @@ func translateFile(ctx context.Context, provider translator.Provider, path strin
 		return 0, fmt.Errorf("failed to load po file for translation: %w", err)
 	}
 
+	target, err := houseStyle.Target(translator.ExtractTargetLanguage(path))
+	if err != nil {
+		return 0, err
+	}
+
 	nplurals := getNPlurals(poFile.MimeHeader)
 	var untranslatedJobs []translationJob
 	for i, msg := range poFile.Messages {
@@ -498,7 +524,7 @@ func translateFile(ctx context.Context, provider translator.Provider, path strin
 		}
 		totalChunks++
 
-		translated, err := translateJobs(ctx, provider, poFile, untranslatedJobs[i:end], path, nplurals, 0, &fileLog)
+		translated, err := translateJobs(ctx, provider, poFile, untranslatedJobs[i:end], target, nplurals, 0, &fileLog)
 		totalTranslated += translated
 
 		// Whatever the chunk did manage is worth keeping, so save before
@@ -531,13 +557,13 @@ func translateFile(ctx context.Context, provider translator.Provider, path strin
 // the whole chunk comes back unusable it is halved and the halves are tried
 // separately, up to maxChunkSplits deep. The smaller size applies only to this
 // chunk; the rest of the file continues at the configured chunk size.
-func translateJobs(ctx context.Context, provider translator.Provider, poFile *po.File, jobs []translationJob, path string, nplurals, depth int, fileLog *zerolog.Logger) (int64, error) {
+func translateJobs(ctx context.Context, provider translator.Provider, poFile *po.File, jobs []translationJob, target translator.Target, nplurals, depth int, fileLog *zerolog.Logger) (int64, error) {
 	msgChunk := make([]po.Message, len(jobs))
 	for i, j := range jobs {
 		msgChunk[i] = j.Msg
 	}
 
-	translations, err := translator.TranslateChunk(ctx, provider, msgChunk, path, nplurals)
+	translations, err := translator.TranslateChunk(ctx, provider, msgChunk, target, nplurals)
 	if err == nil {
 		var accepted int64
 		for j, translation := range translations {
@@ -559,7 +585,7 @@ func translateJobs(ctx context.Context, provider translator.Provider, poFile *po
 				continue
 			}
 			if err := checkTranslation(candidate, nplurals); err != nil {
-				fileLog.Warn().Err(err).Str("msgid", candidate.MsgId).Msg("Discarding translation with mismatched placeholders")
+				fileLog.Warn().Err(err).Str("msgid", candidate.MsgId).Msg("Discarding translation that breaks the source's placeholders or markup")
 				continue
 			}
 
@@ -581,9 +607,9 @@ func translateJobs(ctx context.Context, provider translator.Provider, poFile *po
 	fileLog.Warn().Err(err).Int("entries", len(jobs)).Int("halves", half).Msg("Chunk came back unusable, retrying it in halves")
 
 	var translated int64
-	firstCount, firstErr := translateJobs(ctx, provider, poFile, jobs[:half], path, nplurals, depth+1, fileLog)
+	firstCount, firstErr := translateJobs(ctx, provider, poFile, jobs[:half], target, nplurals, depth+1, fileLog)
 	translated += firstCount
-	secondCount, secondErr := translateJobs(ctx, provider, poFile, jobs[half:], path, nplurals, depth+1, fileLog)
+	secondCount, secondErr := translateJobs(ctx, provider, poFile, jobs[half:], target, nplurals, depth+1, fileLog)
 	translated += secondCount
 
 	switch {
@@ -895,14 +921,19 @@ func fixUnescapedPercents(poFile *po.File) (fixCount int, madeChanges bool) {
 	return fixCount, fixCount > 0
 }
 
-// checkTranslation reports a translation of a python-format or
-// javascript-format entry whose placeholders would fail msgfmt or break
-// formatting at runtime: a spec the msgid doesn't have, a stray percent sign
-// in a python-format string, or a spec the msgid needs that is missing. The
-// singular form of a plural may leave out named specs, since languages often
-// spell out "one"; positional specs must always line up. Empty forms are
-// skipped, as completeness is isMessageTranslated's job.
+// checkTranslation reports a translation that breaks its source. Every entry
+// must keep the source's markup (see checkMarkup). A python-format or
+// javascript-format entry must also keep placeholders that would otherwise
+// fail msgfmt or break formatting at runtime: a spec the msgid doesn't have, a
+// stray percent sign in a python-format string, or a spec the msgid needs that
+// is missing. The singular form of a plural may leave out named specs, since
+// languages often spell out "one"; positional specs must always line up. Empty
+// forms are skipped, as completeness is isMessageTranslated's job.
 func checkTranslation(msg po.Message, nplurals int) error {
+	if err := checkMarkup(msg, nplurals); err != nil {
+		return err
+	}
+
 	var scan func(string) ([]string, int)
 	switch {
 	case hasFlag(msg, "python-format"):
@@ -974,6 +1005,99 @@ func checkTranslation(msg po.Message, nplurals int) error {
 	return nil
 }
 
+// htmlTagPattern matches one HTML tag: opening, closing or self-closing.
+var htmlTagPattern = regexp.MustCompile(`</?[a-zA-Z][^<>]*>`)
+
+// bracePlaceholderPattern matches a str.format() or template placeholder such
+// as {name} or {0}.
+var bracePlaceholderPattern = regexp.MustCompile(`\{[^{}\s]*\}`)
+
+// checkMarkup reports a translation form that changes what the source's markup
+// depends on: its HTML tags, its {brace} placeholders, or the whitespace at
+// either end, which templates and concatenated strings rely on. Tags are
+// compared with runs of whitespace collapsed, since a tag split over lines in
+// a template is the same tag, and in any order, since translations reorder
+// clauses. The singular form of a plural may drop brace placeholders, as it
+// may named specs, but not add any.
+func checkMarkup(msg po.Message, nplurals int) error {
+	type form struct {
+		label    string
+		text     string
+		source   string
+		optional bool
+	}
+	var forms []form
+	if msg.MsgIdPlural == "" {
+		forms = append(forms, form{"msgstr", msg.MsgStr, msg.MsgId, false})
+	} else {
+		for i, s := range msg.MsgStrPlural {
+			if i == 0 && nplurals > 1 {
+				forms = append(forms, form{"msgstr[0]", s, msg.MsgId, true})
+			} else {
+				forms = append(forms, form{fmt.Sprintf("msgstr[%d]", i), s, msg.MsgIdPlural, false})
+			}
+		}
+	}
+
+	for _, f := range forms {
+		if f.text == "" {
+			continue
+		}
+
+		if got, want := htmlTags(f.text), htmlTags(f.source); !slices.Equal(got, want) {
+			return fmt.Errorf("%s has HTML tags %q, want %q", f.label, got, want)
+		}
+
+		got, want := sortedMatches(bracePlaceholderPattern, f.text), sortedMatches(bracePlaceholderPattern, f.source)
+		if f.optional {
+			for _, placeholder := range got {
+				if !slices.Contains(want, placeholder) {
+					return fmt.Errorf("%s has placeholder %s, which the msgid doesn't", f.label, placeholder)
+				}
+			}
+		} else if !slices.Equal(got, want) {
+			return fmt.Errorf("%s has placeholders %q, want %q", f.label, got, want)
+		}
+
+		if strings.TrimSpace(f.source) == "" {
+			continue
+		}
+		gotLead, gotTrail := whitespaceEdges(f.text)
+		wantLead, wantTrail := whitespaceEdges(f.source)
+		if gotLead != wantLead || gotTrail != wantTrail {
+			return fmt.Errorf("%s has leading/trailing whitespace %q/%q, want %q/%q", f.label, gotLead, gotTrail, wantLead, wantTrail)
+		}
+	}
+	return nil
+}
+
+// htmlTags returns the HTML tags in s, sorted, with each tag's runs of
+// whitespace collapsed to a single space.
+func htmlTags(s string) []string {
+	tags := htmlTagPattern.FindAllString(s, -1)
+	for i, tag := range tags {
+		tags[i] = strings.Join(strings.Fields(tag), " ")
+	}
+	sort.Strings(tags)
+	return tags
+}
+
+// sortedMatches returns every match of pattern in s, sorted.
+func sortedMatches(pattern *regexp.Regexp, s string) []string {
+	matches := pattern.FindAllString(s, -1)
+	sort.Strings(matches)
+	return matches
+}
+
+// whitespaceEdges returns the whitespace s starts and ends with.
+func whitespaceEdges(s string) (lead, trail string) {
+	rest := strings.TrimLeftFunc(s, unicode.IsSpace)
+	lead = s[:len(s)-len(rest)]
+	trimmed := strings.TrimRightFunc(s, unicode.IsSpace)
+	trail = s[len(trimmed):]
+	return lead, trail
+}
+
 // clearInvalidTranslations empties translations that checkTranslation rejects,
 // so they are translated again instead of failing msgfmt.
 func clearInvalidTranslations(poFile *po.File, fileLog *zerolog.Logger) (clearedCount int, madeChanges bool) {
@@ -984,7 +1108,7 @@ func clearInvalidTranslations(poFile *po.File, fileLog *zerolog.Logger) (cleared
 		if err == nil {
 			continue
 		}
-		fileLog.Warn().Err(err).Str("msgid", msg.MsgId).Msg("Clearing translation with mismatched placeholders")
+		fileLog.Warn().Err(err).Str("msgid", msg.MsgId).Msg("Clearing translation that breaks the source's placeholders or markup")
 		msg.MsgStr = ""
 		for j := range msg.MsgStrPlural {
 			msg.MsgStrPlural[j] = ""

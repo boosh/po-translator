@@ -33,18 +33,18 @@ func TestExtractTargetLanguage(t *testing.T) {
 
 // MockProvider is a mock implementation of the Provider interface for testing.
 type MockProvider struct {
-	TranslateFunc func(ctx context.Context, messages []po.Message, sourceLang, targetLang string, nplurals int) ([]TranslationResult, error)
+	TranslateFunc func(ctx context.Context, messages []po.Message, sourceLang string, target Target, nplurals int) ([]TranslationResult, error)
 }
 
-func (m *MockProvider) Translate(ctx context.Context, messages []po.Message, sourceLang, targetLang string, nplurals int) ([]TranslationResult, error) {
+func (m *MockProvider) Translate(ctx context.Context, messages []po.Message, sourceLang string, target Target, nplurals int) ([]TranslationResult, error) {
 	if m.TranslateFunc != nil {
-		return m.TranslateFunc(ctx, messages, sourceLang, targetLang, nplurals)
+		return m.TranslateFunc(ctx, messages, sourceLang, target, nplurals)
 	}
 	// Default behavior
 	var results []TranslationResult
 	for _, msg := range messages {
 		results = append(results, TranslationResult{
-			MsgStr: fmt.Sprintf("Translated: %s to %s", msg.MsgId, targetLang),
+			MsgStr: fmt.Sprintf("Translated: %s to %s", msg.MsgId, target.Code),
 		})
 	}
 	return results, nil
@@ -59,13 +59,13 @@ func TestTranslateChunk(t *testing.T) {
 		{MsgId: "Hello"},
 		{MsgId: "Goodbye"},
 	}
-	filePath := "locale/es/LC_MESSAGES/test.po"
+	target := Target{Code: "es", Name: "Spanish (Spain)"}
 	nplurals := 2
 	ctx := context.Background()
 
 	t.Run("successful translation", func(t *testing.T) {
 		mockProvider := &MockProvider{}
-		translations, err := TranslateChunk(ctx, mockProvider, messages, filePath, nplurals)
+		translations, err := TranslateChunk(ctx, mockProvider, messages, target, nplurals)
 		require.NoError(t, err)
 		require.Len(t, translations, 2)
 		assert.Equal(t, "Translated: Hello to es", translations[0].MsgStr)
@@ -74,11 +74,11 @@ func TestTranslateChunk(t *testing.T) {
 
 	t.Run("provider error", func(t *testing.T) {
 		mockProvider := &MockProvider{
-			TranslateFunc: func(ctx context.Context, messages []po.Message, sourceLang, targetLang string, nplurals int) ([]TranslationResult, error) {
+			TranslateFunc: func(ctx context.Context, messages []po.Message, sourceLang string, target Target, nplurals int) ([]TranslationResult, error) {
 				return nil, fmt.Errorf("API error")
 			},
 		}
-		_, err := TranslateChunk(ctx, mockProvider, messages, filePath, nplurals)
+		_, err := TranslateChunk(ctx, mockProvider, messages, target, nplurals)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "API error")
 	})

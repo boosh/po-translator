@@ -59,8 +59,8 @@ func (p *OpenAICompatibleProvider) String() string {
 }
 
 // Translate sends a translation request to the provider's chat completions API.
-func (p *OpenAICompatibleProvider) Translate(ctx context.Context, messages []po.Message, sourceLang, targetLang string, nplurals int) ([]TranslationResult, error) {
-	prompt, err := buildTranslationPrompt(messages, sourceLang, targetLang, nplurals)
+func (p *OpenAICompatibleProvider) Translate(ctx context.Context, messages []po.Message, sourceLang string, target Target, nplurals int) ([]TranslationResult, error) {
+	prompt, err := buildTranslationPrompt(messages, sourceLang, target, nplurals)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build prompt: %w", err)
 	}
