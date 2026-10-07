@@ -77,9 +77,9 @@ func init() {
 	rootCmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "Process files but do not write any changes")
 	rootCmd.Flags().BoolVar(&dedupe, "dedupe", false, "Deduplicate entries with the same msgid and msgstr")
 	rootCmd.Flags().BoolVar(&fix, "fix", false, "Make percent signs in msgstr follow the msgid's escaping, including in new translations")
-	rootCmd.Flags().IntVar(&maxTranslations, "max-translations", 0, "Max number of entries to translate per file (0 for no limit)")
+	rootCmd.Flags().IntVar(&maxTranslations, "max-translations", 0, "Max number of entries to translate across all files (0 for no limit)")
 	rootCmd.Flags().BoolVar(&noTranslate, "no-translate", false, "Disable translation and only perform other operations (e.g., --fix, --dedupe)")
-	rootCmd.Flags().BoolVar(&revertIfUnchanged, "revert-if-unchanged", false, "Revert .po file to its git HEAD version if it needs no translations and its entries match HEAD")
+	rootCmd.Flags().BoolVar(&revertIfUnchanged, "revert-if-unchanged", false, "Revert .po file to its git HEAD version if its entries match HEAD")
 	rootCmd.Flags().BoolVarP(&yes, "yes", "y", false, "Automatically answer yes to all prompts and skip confirmation")
 	rootCmd.Flags().BoolVar(&logPrompt, "log-prompt", false, "Log the full prompt sent to the AI provider (for debugging)")
 }
@@ -151,6 +151,8 @@ func run(cmd *cobra.Command, args []string) {
 		totalUntranslated += len(msgs)
 	}
 
+	fileLimits := allocateTranslationBudget(filesToTranslate, untranslatedFileMessages, maxTranslations)
+
 	if !yes && !dryRun {
 		fmt.Println("The following files have untranslated entries:")
 		for _, path := range filesToTranslate {
@@ -168,6 +170,9 @@ func run(cmd *cobra.Command, args []string) {
 			}
 		}
 		fmt.Printf("\nTotal: %d untranslated entries across %d file(s).\n", totalUntranslated, len(filesToTranslate))
+		if maxTranslations > 0 && maxTranslations < totalUntranslated {
+			fmt.Printf("Only the first %d will be translated (--max-translations).\n", maxTranslations)
+		}
 		fmt.Printf("Translating with %s, model %s.\n", aiProvider.String(), model)
 		fmt.Print("Proceed with translation? (y/N): ")
 
@@ -188,20 +193,24 @@ func run(cmd *cobra.Command, args []string) {
 	semaphore := make(chan struct{}, 4)
 
 	for _, path := range filesToTranslate {
+		limit, ok := fileLimits[path]
+		if !ok {
+			continue
+		}
 		wg.Add(1)
-		go func(p string) {
+		go func(p string, limit int) {
 			defer wg.Done()
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			translations, err := translateFile(ctx, aiProvider, p, chunkSize)
+			translations, err := translateFile(ctx, aiProvider, p, chunkSize, limit)
 			if err != nil {
 				log.Error().Err(err).Str("file", p).Msg("Failed to translate file")
 				atomic.AddInt64(&totalErrors, 1)
 			} else {
 				atomic.AddInt64(&totalTranslations, translations)
 			}
-		}(path)
+		}(path, limit)
 	}
 	wg.Wait()
 
@@ -314,10 +323,12 @@ func preprocessFile(path string) ([]po.Message, error) {
 		}
 	}
 
-	if len(untranslated) == 0 && revertIfUnchanged && !dryRun {
+	if revertIfUnchanged && !dryRun {
 		// Reverting is only meant to drop header churn such as a new
 		// POT-Creation-Date. Entries that differ from HEAD (removed strings,
 		// kept fuzzy translations, uncommitted edits) would be lost by it.
+		// Entries still untranslated in HEAD don't stop it: the reverted file
+		// has the same entries, so the translation pass works on it unchanged.
 		unchanged, err := entriesMatchHead(poFile, path)
 		switch {
 		case err != nil:
@@ -329,7 +340,6 @@ func preprocessFile(path string) ([]po.Message, error) {
 				fileLog.Warn().Err(err).Msg("Could not revert file to git HEAD, saving cleaned-up version instead")
 			} else {
 				fileLog.Info().Msg("Reverted file to git HEAD version to avoid spurious commit")
-				return nil, nil
 			}
 		}
 	}
@@ -423,7 +433,31 @@ type translationJob struct {
 // than the last few stragglers are worth.
 const maxChunkSplits = 2
 
-func translateFile(ctx context.Context, provider translator.Provider, path string, chunkSize int) (int64, error) {
+// allocateTranslationBudget shares a run-wide cap on translations out between
+// files, in the order given, before any are translated concurrently. Files the
+// budget doesn't reach are left out of the result. With no cap (budget <= 0)
+// every file is included with a limit of 0, meaning unlimited.
+func allocateTranslationBudget(paths []string, untranslated map[string][]po.Message, budget int) map[string]int {
+	limits := make(map[string]int, len(paths))
+	remaining := budget
+	for _, path := range paths {
+		if budget <= 0 {
+			limits[path] = 0
+			continue
+		}
+		if remaining == 0 {
+			break
+		}
+		share := min(len(untranslated[path]), remaining)
+		limits[path] = share
+		remaining -= share
+	}
+	return limits
+}
+
+// translateFile translates up to limit untranslated entries in one file (0 for
+// no limit), saving after every chunk.
+func translateFile(ctx context.Context, provider translator.Provider, path string, chunkSize, limit int) (int64, error) {
 	fileLog := log.With().Str("file", path).Logger()
 	fileLog.Info().Msg("Translating file")
 
@@ -444,9 +478,9 @@ func translateFile(ctx context.Context, provider translator.Provider, path strin
 		return 0, nil
 	}
 
-	if maxTranslations > 0 && len(untranslatedJobs) > maxTranslations {
-		fileLog.Info().Int("limit", maxTranslations).Int("original_count", len(untranslatedJobs)).Msg("Limiting translations to max-translations")
-		untranslatedJobs = untranslatedJobs[:maxTranslations]
+	if limit > 0 && len(untranslatedJobs) > limit {
+		fileLog.Info().Int("limit", limit).Int("original_count", len(untranslatedJobs)).Msg("Limiting translations to this file's share of max-translations")
+		untranslatedJobs = untranslatedJobs[:limit]
 	}
 
 	if dryRun {

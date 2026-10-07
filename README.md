@@ -137,7 +137,7 @@ po-translator [flags] <glob-pattern...>
 | `--api-key`             | `string`   |         | API key for the provider. Overrides the provider's environment variable.                                                                |
 | `--base-url`            | `string`   |         | Base URL for the provider API. Overrides `LLM_BASE_URL` and the provider default.                                                       |
 | `--no-translate`        | `bool`     | `false` | Disable translation and only perform cleanup operations.                                                                                |
-| `--max-translations`    | `int`      | `0`     | Max number of entries to translate per file (0 for no limit).                                                                           |
+| `--max-translations`    | `int`      | `0`     | Max number of entries to translate across all files (0 for no limit).                                                                   |
 | **Cleanup**             |            |         |                                                                                                                                         |
 | `--fix`                 | `bool`     | `false` | Fix unescaped percent signs (`%` -> `%%`).                                                                                              |
 | `--dedupe`              | `bool`     | `false` | Remove duplicate entries with the same `msgid`.                                                                                         |

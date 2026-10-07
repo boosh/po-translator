@@ -807,6 +807,27 @@ func TestPreprocessFile_RevertKeepsChangedEntries(t *testing.T) {
 	}
 }
 
+func TestPreprocessFile_RevertsWithUntranslatedEntries(t *testing.T) {
+	// An entry that was already untranslated in HEAD must not stop the
+	// header-only changes from being reverted, and must still be returned for
+	// translation.
+	committed := "msgid \"\"\nmsgstr \"\"\n\"POT-Creation-Date: 2026-10-06 10:12+0100\\n\"\n\nmsgid \"Hello\"\nmsgstr \"Hallo\"\n\nmsgid \"options\"\nmsgstr \"\"\n"
+	modified := "msgid \"\"\nmsgstr \"\"\n\"POT-Creation-Date: 2026-10-06 16:09+0100\\n\"\n\nmsgid \"Hello\"\nmsgstr \"Hallo\"\n\nmsgid \"options\"\nmsgstr \"\"\n\n"
+	poPath := commitPoFile(t, committed, modified)
+
+	revertIfUnchanged = true
+	defer func() { revertIfUnchanged = false }()
+
+	untranslated, err := preprocessFile(poPath)
+	require.NoError(t, err)
+	require.Len(t, untranslated, 1)
+	assert.Equal(t, "options", untranslated[0].MsgId)
+
+	final, err := os.ReadFile(poPath)
+	require.NoError(t, err)
+	assert.Equal(t, committed, string(final), "Header-only changes should be reverted")
+}
+
 func TestPreprocessFile_DryRunDoesNotRevert(t *testing.T) {
 	committed := "msgid \"Hello\"\nmsgstr \"Hallo\"\n"
 	modified := "msgid \"\"\nmsgstr \"\"\n\"POT-Creation-Date: 2026-10-06\\n\"\n\nmsgid \"Hello\"\nmsgstr \"Hallo\"\n"
@@ -942,22 +963,43 @@ msgstr ""
 	err = os.WriteFile(poPath, []byte(strings.TrimSpace(poContent)), 0644)
 	require.NoError(t, err)
 
-	// Set the global flags for this test case
-	maxTranslations = 2
-	defer func() {
-		maxTranslations = 0 // Reset to default
-	}()
-
 	mockAI := &mockProvider{}
 	var provider translator.Provider = mockAI
 
-	// Run translateFile
-	_, err = translateFile(context.Background(), provider, poPath, 10)
+	// Run translateFile with this file's share of the budget
+	_, err = translateFile(context.Background(), provider, poPath, 10, 2)
 	assert.NoError(t, err)
 
 	// Assert that the AI provider was called with the correct number of messages
 	assert.Equal(t, 2, mockAI.translatedMessages, "Expected to translate only the max number of messages")
 	assert.Equal(t, 1, mockAI.translationRequests, "Expected only one chunk request for the limited set of messages")
+}
+
+func TestAllocateTranslationBudget(t *testing.T) {
+	// The cap applies to the whole run: files are given shares in order until
+	// it is spent, and files it doesn't reach are left out entirely.
+	untranslated := map[string][]po.Message{
+		"a.po": make([]po.Message, 3),
+		"b.po": make([]po.Message, 5),
+		"c.po": make([]po.Message, 4),
+	}
+	paths := []string{"a.po", "b.po", "c.po"}
+
+	t.Run("budget spans files", func(t *testing.T) {
+		assert.Equal(t, map[string]int{"a.po": 3, "b.po": 4}, allocateTranslationBudget(paths, untranslated, 7))
+	})
+
+	t.Run("budget smaller than the first file", func(t *testing.T) {
+		assert.Equal(t, map[string]int{"a.po": 2}, allocateTranslationBudget(paths, untranslated, 2))
+	})
+
+	t.Run("budget larger than everything", func(t *testing.T) {
+		assert.Equal(t, map[string]int{"a.po": 3, "b.po": 5, "c.po": 4}, allocateTranslationBudget(paths, untranslated, 100))
+	})
+
+	t.Run("no budget means every file, unlimited", func(t *testing.T) {
+		assert.Equal(t, map[string]int{"a.po": 0, "b.po": 0, "c.po": 0}, allocateTranslationBudget(paths, untranslated, 0))
+	})
 }
 
 func TestPreprocessFile_SortsCorrectly(t *testing.T) {
@@ -1205,7 +1247,7 @@ func TestTranslateFileHalvesUnusableChunk(t *testing.T) {
 		return nil
 	}}
 
-	translated, err := translateFile(context.Background(), provider, path, 4)
+	translated, err := translateFile(context.Background(), provider, path, 4, 0)
 	require.NoError(t, err)
 	assert.Equal(t, int64(4), translated)
 
@@ -1231,7 +1273,7 @@ func TestTranslateFileHalvingIsPerChunk(t *testing.T) {
 		return nil
 	}}
 
-	translated, err := translateFile(context.Background(), provider, path, 2)
+	translated, err := translateFile(context.Background(), provider, path, 2, 0)
 	require.NoError(t, err)
 	assert.Equal(t, int64(4), translated)
 
@@ -1254,7 +1296,7 @@ func TestTranslateFileContinuesAfterFailedChunk(t *testing.T) {
 		return nil
 	}}
 
-	translated, err := translateFile(context.Background(), provider, path, 2)
+	translated, err := translateFile(context.Background(), provider, path, 2, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "1 of 2 chunks failed")
 	assert.Equal(t, int64(2), translated)
@@ -1279,7 +1321,7 @@ func TestTranslateFileStrictStopsAtFirstFailedChunk(t *testing.T) {
 		return fmt.Errorf("401 Unauthorized")
 	}}
 
-	_, err := translateFile(context.Background(), provider, path, 2)
+	_, err := translateFile(context.Background(), provider, path, 2, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "chunk 1-2")
 	assert.Len(t, provider.calls, 1, "strict mode should not try the next chunk")
@@ -1365,7 +1407,7 @@ msgstr ""
 		{MsgStr: ""},
 	}}
 
-	translated, err := translateFile(context.Background(), provider, path, 10)
+	translated, err := translateFile(context.Background(), provider, path, 10, 0)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), translated, "Only the valid translation should count")
 
